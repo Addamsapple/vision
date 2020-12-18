@@ -9,5 +9,5 @@ extern unsigned char *d_rtri;
 
 void initializePreprocessing();
 void rectifyImages(unsigned char *l, unsigned char *r, unsigned char *o);
-void transposeRectifiedImages();
 void integrateImages();
+void transposeImages();

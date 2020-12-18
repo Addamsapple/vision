@@ -35,11 +35,11 @@ __global__ void rectifyLeftImage(unsigned char *d_ri, unsigned char *d_di, int t
 template<int w, int h>
 __global__ void rectifyRightImage(unsigned char *d_ri, unsigned char *d_di, int t_dio);
 template<int w, int h>
-__global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri);
-template<int w, int h>
 __global__ void integrateImageVertically(int *d_U, unsigned char *d_I);
 template<int w, int h>
 __global__ void integrateImageHorizontally(int *d_U);
+template<int w, int h>
+__global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri);
 
 void initializePreprocessing() {
 	cudaMallocPitch(&d_di, &d_dip, DISTORTED_IMAGE_WIDTH * sizeof(unsigned char), DISTORTED_IMAGE_HEIGHT);
@@ -63,16 +63,16 @@ void rectifyImages(unsigned char *l, unsigned char *r, unsigned char *o) {
 	rectifyRightImage<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<RECTIFICATION_BLOCKS, RECTIFICATION_THREADS>>>(d_rri, d_di, t_dio);
 }
 
-void transposeRectifiedImages() {
-	transposeImage<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<TRANSPOSING_BLOCKS, TRANSPOSING_THREADS>>>(d_ltri, d_lri);
-	transposeImage<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<TRANSPOSING_BLOCKS, TRANSPOSING_THREADS>>>(d_rtri, d_rri);
-}
-
 void integrateImages() {
 	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_lrii, d_lri);
 	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_lrii);  
 	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_rrii, d_rri);
 	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_rrii);	
+}
+
+void transposeImages() {
+	transposeImage<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<TRANSPOSING_BLOCKS, TRANSPOSING_THREADS>>>(d_ltri, d_lri);
+	transposeImage<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<TRANSPOSING_BLOCKS, TRANSPOSING_THREADS>>>(d_rtri, d_rri);
 }
 
 template<int w, int h>
@@ -112,17 +112,6 @@ __global__ void rectifyRightImage(unsigned char *d_ri, unsigned char *d_di, int 
 }
 
 template<int w, int h>
-__global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri) {
-	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
-	int l_c = l_r / h;
-	l_r -= l_c * h;
-	l_c *= TRANSPOSING_THREAD_PIXELS;
-	#pragma unroll
-	for (int l_ro = 0; l_ro < TRANSPOSING_THREAD_PIXELS && l_c + l_ro < w; l_ro++)
-		d_tri[l_r + (l_c + l_ro) * h] = d_ri[l_c + l_ro + l_r * w];
-}
-
-template<int w, int h>
 __global__ void integrateImageVertically(int *d_rii, unsigned char *d_ri) {
 	int l_c = threadIdx.x + blockIdx.x * blockDim.x;
 	if (l_c < w + 1) {
@@ -157,4 +146,15 @@ __global__ void integrateImageHorizontally(int *d_rii) {
 	}
 	for (int l_c = threadIdx.x; l_c < w + 1; l_c += blockDim.x)
 		d_rii[l_c + l_r * (w + 1)] = s_b[l_i][l_c];
+}
+
+template<int w, int h>
+__global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri) {
+	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
+	int l_c = l_r / h;
+	l_r -= l_c * h;
+	l_c *= TRANSPOSING_THREAD_PIXELS;
+	#pragma unroll
+	for (int l_ro = 0; l_ro < TRANSPOSING_THREAD_PIXELS && l_c + l_ro < w; l_ro++)
+		d_tri[l_r + (l_c + l_ro) * h] = d_ri[l_c + l_ro + l_r * w];
 }
