@@ -10,11 +10,19 @@
 #define TRANSPOSING_THREAD_PIXELS 16
 #define TRANSPOSING_BLOCKS (((RECTIFIED_IMAGE_WIDTH + TRANSPOSING_THREAD_PIXELS - 1) / (TRANSPOSING_THREAD_PIXELS) * RECTIFIED_IMAGE_HEIGHT + TRANSPOSING_THREADS - 1) / TRANSPOSING_THREADS)
 
+#define VERTICAL_INTEGRATION_THREADS 128
+#define VERTICAL_INTEGRATION_BLOCKS ((RECTIFIED_IMAGE_WIDTH + 1 + VERTICAL_INTEGRATION_THREADS - 1) / VERTICAL_INTEGRATION_THREADS)
+#define HORIZONTAL_INTEGRATION_THREADS 416
+#define HORIZONTAL_INTEGRATION_BLOCKS RECTIFIED_IMAGE_HEIGHT
+
 unsigned char *d_di;
 size_t d_dip;
 
 unsigned char *d_lri;
 unsigned char *d_rri;
+
+int *d_lrii;
+int *d_rrii;
 
 unsigned char *d_ltri;
 unsigned char *d_rtri;
@@ -28,6 +36,10 @@ template<int w, int h>
 __global__ void rectifyRightImage(unsigned char *d_ri, unsigned char *d_di, int t_dio);
 template<int w, int h>
 __global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri);
+template<int w, int h>
+__global__ void integrateImageVertically(int *d_U, unsigned char *d_I);
+template<int w, int h>
+__global__ void integrateImageHorizontally(int *d_U);
 
 void initializePreprocessing() {
 	cudaMallocPitch(&d_di, &d_dip, DISTORTED_IMAGE_WIDTH * sizeof(unsigned char), DISTORTED_IMAGE_HEIGHT);
@@ -38,6 +50,8 @@ void initializePreprocessing() {
 	t_dio /= sizeof(unsigned char);
 	cudaMalloc(&d_lri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
 	cudaMalloc(&d_rri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
+	cudaMalloc(&d_lrii, (RECTIFIED_IMAGE_WIDTH + 1) * (RECTIFIED_IMAGE_HEIGHT + 1) * sizeof(int));
+	cudaMalloc(&d_rrii, (RECTIFIED_IMAGE_WIDTH + 1) * (RECTIFIED_IMAGE_HEIGHT + 1) * sizeof(int));
 	cudaMalloc(&d_ltri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
 	cudaMalloc(&d_rtri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
 }
@@ -52,6 +66,13 @@ void rectifyImages(unsigned char *l, unsigned char *r, unsigned char *o) {
 void transposeRectifiedImages() {
 	transposeImage<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<TRANSPOSING_BLOCKS, TRANSPOSING_THREADS>>>(d_ltri, d_lri);
 	transposeImage<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<TRANSPOSING_BLOCKS, TRANSPOSING_THREADS>>>(d_rtri, d_rri);
+}
+
+void integrateImages() {
+	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_lrii, d_lri);
+	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_lrii);  
+	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_rrii, d_rri);
+	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_rrii);	
 }
 
 template<int w, int h>
@@ -99,4 +120,41 @@ __global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri) {
 	#pragma unroll
 	for (int l_ro = 0; l_ro < TRANSPOSING_THREAD_PIXELS && l_c + l_ro < w; l_ro++)
 		d_tri[l_r + (l_c + l_ro) * h] = d_ri[l_c + l_ro + l_r * w];
+}
+
+template<int w, int h>
+__global__ void integrateImageVertically(int *d_rii, unsigned char *d_ri) {
+	int l_c = threadIdx.x + blockIdx.x * blockDim.x;
+	if (l_c < w + 1) {
+		d_rii[l_c] = 0;
+		int l_s = 0;
+		if (l_c > 0)
+			for (int l_r = 1; l_r < h + 1; l_r++) {
+				l_s += d_ri[l_c - 1 + (l_r - 1) * w];
+				d_rii[l_c + l_r * (w + 1)] = l_s;
+			}
+		else
+			for (int l_r = 1; l_r < h + 1; l_r++)
+				d_rii[l_r * (w + 1)] = 0;
+	}
+}
+
+template<int w, int h>
+__global__ void integrateImageHorizontally(int *d_rii) {
+	int l_r = blockIdx.x + 1;
+	volatile __shared__ int s_b[2][w + 1];
+	for (int l_c = threadIdx.x; l_c < w + 1; l_c += blockDim.x)
+		s_b[0][l_c] = d_rii[l_c + l_r * (w + 1)];	
+	int l_i = 0;
+	for (int l_co = 1; w - l_co > -1; l_co <<= 1) {
+		__syncthreads();
+		for (int l_c = threadIdx.x; l_c < w + 1; l_c += blockDim.x)
+			if (l_c - l_co > -1)
+				s_b[1 - l_i][l_c] = s_b[l_i][l_c] + s_b[l_i][l_c - l_co];
+			else
+				s_b[1 - l_i][l_c] = s_b[l_i][l_c];
+		l_i = 1 - l_i;
+	}
+	for (int l_c = threadIdx.x; l_c < w + 1; l_c += blockDim.x)
+		d_rii[l_c + l_r * (w + 1)] = s_b[l_i][l_c];
 }
