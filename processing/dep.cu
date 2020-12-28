@@ -28,15 +28,16 @@ size_t d_ctp;
 template<int w, int h>
 __global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
 template<int w, int h>
-__device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
-template<int w, int h>
-__device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
-template<int w, int h>
 __global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
 template<int w, int h>
 __global__ void propagateDiscontinuities(unsigned char *d_b2, unsigned char *d_b1);
 template<int w, int h>
 __global__ void propagateOcclusions(unsigned char *d_b2, unsigned char *d_b1);
+
+template<int w, int h>
+__device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
+template<int w, int h>
+__device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
 
 void initializeDisparityMapComputation() {
 	cudaMallocPitch(&d_tt, &d_ttp, RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char), RECTIFIED_IMAGE_WIDTH * (MAXIMUM_DISPARITY + 1));
@@ -72,8 +73,96 @@ __global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, u
 		computeSolutionsLeftwards<w, h>(d_ltri, d_rtri, d_tt, d_ct, d_ttp, d_ctp);
 }
 
+//rename these
 #define cost(row, column, offset) d_ct[row + d_ctp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
 #define map(row, column, offset) d_tt[row + d_ttp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
+
+template<int w, int h>
+__global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
+	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
+	if (l_r < h) {
+		float l_mc = FLT_MAX;
+		int l_mi = -1;
+		for (int l_do = 0; l_do < MAXIMUM_DISPARITY + 1; l_do++) {
+			float l_c = cost(l_r, (w / 2 - 1) % 2, l_do) + cost(l_r, (w - 1) / 2 % 2 + 2, l_do);
+			if (l_c < l_mc) {
+				l_mc = l_c;
+				l_mi = l_do;
+			}		
+		}
+		int l_co = w / 2 - 1;
+		unsigned char l_do = l_mi;
+		while (l_co > -1) {
+			unsigned char l_t = map(l_r, l_co, l_do);
+			if (l_t == MATCH) {
+				d_b[l_r + l_co * h] = MAXIMUM_DISPARITY - l_do;
+				l_co--;
+			} else if (l_t == LEFT_OCCLUSION) {
+				d_b[l_r + l_co * h] = 0;
+				l_co--;
+				l_do++;
+			} else
+				l_do--;
+		}
+		//test
+		l_co = w / 2;
+		l_do = l_mi;
+		while (l_co < w) {
+			unsigned char l_map = map(l_r, l_co, l_do);
+			if (l_map == MATCH) {
+				d_b[l_r + l_co * h] = MAXIMUM_DISPARITY - l_do;
+				l_co++;
+			} else if (l_map == LEFT_OCCLUSION) {
+				d_b[l_r + l_co * h] = 0;
+				l_co++;
+				l_do--;
+			} else
+				l_do++;
+		}
+	}
+}
+
+template<int w, int h>
+__global__ void propagateDiscontinuities(unsigned char *d_b2, unsigned char *d_b1) {
+	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
+	int l_c = l_r / (h - 2);
+	l_r -= l_c * (h - 2) - 1;
+	l_c = l_c * PROPAGATION_THREAD_PIXELS + 1;
+	for (int l_co = 0; l_co < PROPAGATION_THREAD_PIXELS && l_c + l_co < w - 1; l_co++) {
+		int l_ld = d_b1[l_r + (l_c + l_co - 1) * h];
+		int l_rd = d_b1[l_r + (l_c + l_co + 1) * h];
+		int l_ud = d_b1[l_r - 1 + (l_c + l_co) * h];
+		int l_dd = d_b1[l_r + 1 + (l_c + l_co) * h];
+		if (l_ld == 0 || l_ld != l_rd || l_ld != l_ud || l_ld != l_dd)
+			d_b2[l_r + (l_c + l_co) * h] = 0;
+		else {
+			int l_d = d_b1[l_r + (l_c + l_co) * h];
+			if (l_d != l_ld)
+				d_b2[l_r + (l_c + l_co) * h] = 0;
+			else
+				d_b2[l_r + (l_c + l_co) * h] = l_d;
+		}
+	}
+}
+
+//does not invalidate border pixels
+template<int w, int h>
+__global__ void propagateOcclusions(unsigned char *d_b2, unsigned char *d_b1) {
+	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
+	int l_c = l_r / (h - 2);
+	l_r -= l_c * (h - 2) - 1;
+	l_c = l_c * PROPAGATION_THREAD_PIXELS + 1;
+	for (int l_co = 0; l_co < PROPAGATION_THREAD_PIXELS && l_c + l_co < w - 1; l_co++) {
+		int l_ld = d_b1[l_r + (l_c + l_co - 1) * h];
+		int l_rd = d_b1[l_r + (l_c + l_co + 1) * h];
+		int l_ud = d_b1[l_r - 1 + (l_c + l_co) * h];
+		int l_dd = d_b1[l_r + 1 + (l_c + l_co) * h];
+		if (l_ld == 0 || l_rd == 0 || l_ud == 0 || l_dd == 0)
+			d_b2[l_r + (l_c + l_co) * h] = 0;
+		else
+			d_b2[l_r + (l_c + l_co) * h] = d_b1[l_r + (l_c + l_co) * h];
+	}
+}
 
 template<int w, int h>
 __device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
@@ -208,92 +297,5 @@ __device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *
 			else
 				map(l_r, l_co, 0) = RIGHT_OCCLUSION;
 		}
-	}
-}
-
-template<int w, int h>
-__global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
-	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
-	if (l_r < h) {
-		float l_mc = FLT_MAX;
-		int l_mi = -1;
-		for (int l_do = 0; l_do < MAXIMUM_DISPARITY + 1; l_do++) {
-			float l_c = cost(l_r, (w / 2 - 1) % 2, l_do) + cost(l_r, (w - 1) / 2 % 2 + 2, l_do);
-			if (l_c < l_mc) {
-				l_mc = l_c;
-				l_mi = l_do;
-			}		
-		}
-		int l_co = w / 2 - 1;
-		unsigned char l_do = l_mi;
-		while (l_co > -1) {
-			unsigned char l_t = map(l_r, l_co, l_do);
-			if (l_t == MATCH) {
-				d_b[l_r + l_co * h] = MAXIMUM_DISPARITY - l_do;
-				l_co--;
-			} else if (l_t == LEFT_OCCLUSION) {
-				d_b[l_r + l_co * h] = 0;
-				l_co--;
-				l_do++;
-			} else
-				l_do--;
-		}
-		//test
-		l_co = w / 2;
-		l_do = l_mi;
-		while (l_co < w) {
-			unsigned char l_map = map(l_r, l_co, l_do);
-			if (l_map == MATCH) {
-				d_b[l_r + l_co * h] = MAXIMUM_DISPARITY - l_do;
-				l_co++;
-			} else if (l_map == LEFT_OCCLUSION) {
-				d_b[l_r + l_co * h] = 0;
-				l_co++;
-				l_do--;
-			} else
-				l_do++;
-		}
-	}
-}
-
-template<int w, int h>
-__global__ void propagateDiscontinuities(unsigned char *d_b2, unsigned char *d_b1) {
-	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
-	int l_c = l_r / (h - 2);
-	l_r -= l_c * (h - 2) - 1;
-	l_c = l_c * PROPAGATION_THREAD_PIXELS + 1;
-	for (int l_co = 0; l_co < PROPAGATION_THREAD_PIXELS && l_c + l_co < w - 1; l_co++) {
-		int l_ld = d_b1[l_r + (l_c + l_co - 1) * h];
-		int l_rd = d_b1[l_r + (l_c + l_co + 1) * h];
-		int l_ud = d_b1[l_r - 1 + (l_c + l_co) * h];
-		int l_dd = d_b1[l_r + 1 + (l_c + l_co) * h];
-		if (l_ld == 0 || l_ld != l_rd || l_ld != l_ud || l_ld != l_dd)
-			d_b2[l_r + (l_c + l_co) * h] = 0;
-		else {
-			int l_d = d_b1[l_r + (l_c + l_co) * h];
-			if (l_d != l_ld)
-				d_b2[l_r + (l_c + l_co) * h] = 0;
-			else
-				d_b2[l_r + (l_c + l_co) * h] = l_d;
-		}
-	}
-}
-
-//does not invalidate border pixels
-template<int w, int h>
-__global__ void propagateOcclusions(unsigned char *d_b2, unsigned char *d_b1) {
-	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
-	int l_c = l_r / (h - 2);
-	l_r -= l_c * (h - 2) - 1;
-	l_c = l_c * PROPAGATION_THREAD_PIXELS + 1;
-	for (int l_co = 0; l_co < PROPAGATION_THREAD_PIXELS && l_c + l_co < w - 1; l_co++) {
-		int l_ld = d_b1[l_r + (l_c + l_co - 1) * h];
-		int l_rd = d_b1[l_r + (l_c + l_co + 1) * h];
-		int l_ud = d_b1[l_r - 1 + (l_c + l_co) * h];
-		int l_dd = d_b1[l_r + 1 + (l_c + l_co) * h];
-		if (l_ld == 0 || l_rd == 0 || l_ud == 0 || l_dd == 0)
-			d_b2[l_r + (l_c + l_co) * h] = 0;
-		else
-			d_b2[l_r + (l_c + l_co) * h] = d_b1[l_r + (l_c + l_co) * h];
 	}
 }
