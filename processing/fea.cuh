@@ -1,1 +1,3 @@
-void keyPoints();
+void initializeFeatureMatching();
+void computeInterestPoints();
+void matchInterestPoints();
