@@ -17,41 +17,73 @@
 
 unsigned char *d_di;
 size_t d_dip;
+texture<unsigned char, cudaTextureType2D, cudaReadModeNormalizedFloat> t_di;
+size_t t_dio;
 
 unsigned char *d_lri;
 unsigned char *d_rri;
 
 int *d_lrii;
+size_t d_lriip;
+cudaTextureObject_t t_lriii;
+
 int *d_rrii;
+size_t d_rriip;
+cudaTextureObject_t t_rriii;
 
 unsigned char *d_ltri;
 unsigned char *d_rtri;
-
-texture<unsigned char, cudaTextureType2D, cudaReadModeNormalizedFloat> t_di;
-size_t t_dio;
 
 template<int w, int h>
 __global__ void rectifyLeftImage(unsigned char *d_ri, unsigned char *d_di, int t_dio);
 template<int w, int h>
 __global__ void rectifyRightImage(unsigned char *d_ri, unsigned char *d_di, int t_dio);
 template<int w, int h>
-__global__ void integrateImageVertically(int *d_U, unsigned char *d_I);
-template<int w, int h>
-__global__ void integrateImageHorizontally(int *d_U);
+__global__ void integrateImageVertically(int *d_rii, int d_riip, unsigned char *d_ri);
+template<int w>
+__global__ void integrateImageHorizontally(int *d_rii, int d_riip);
 template<int w, int h>
 __global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri);
 
+#include <iostream>
+
 void initializePreprocessing() {
 	cudaMallocPitch(&d_di, &d_dip, DISTORTED_IMAGE_WIDTH * sizeof(unsigned char), DISTORTED_IMAGE_HEIGHT);
-	d_dip /= sizeof(unsigned char);
+	t_di.addressMode[0] = cudaAddressModeBorder;
+	t_di.addressMode[1] = cudaAddressModeBorder;
 	t_di.filterMode = cudaFilterModeLinear;
-	cudaChannelFormatDesc c = cudaCreateChannelDesc<unsigned char>();
-	cudaBindTexture2D(&t_dio, &t_di, d_di, &c, DISTORTED_IMAGE_WIDTH, DISTORTED_IMAGE_HEIGHT, d_dip);
+	cudaChannelFormatDesc textureChannelDescription = cudaCreateChannelDesc<unsigned char>();
+	cudaBindTexture2D(&t_dio, &t_di, d_di, &textureChannelDescription, DISTORTED_IMAGE_WIDTH, DISTORTED_IMAGE_HEIGHT, d_dip);
+	d_dip /= sizeof(unsigned char);
 	t_dio /= sizeof(unsigned char);
 	cudaMalloc(&d_lri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
 	cudaMalloc(&d_rri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
-	cudaMalloc(&d_lrii, (RECTIFIED_IMAGE_WIDTH + 1) * (RECTIFIED_IMAGE_HEIGHT + 1) * sizeof(int));
-	cudaMalloc(&d_rrii, (RECTIFIED_IMAGE_WIDTH + 1) * (RECTIFIED_IMAGE_HEIGHT + 1) * sizeof(int));
+	cudaMallocPitch(&d_lrii, &d_lriip, (RECTIFIED_IMAGE_WIDTH + 1) * sizeof(int), RECTIFIED_IMAGE_HEIGHT + 1);
+	textureChannelDescription = cudaCreateChannelDesc<int>();
+	cudaResourceDesc textureResourceDescription;
+	memset(&textureResourceDescription, 0, sizeof(textureResourceDescription));
+	textureResourceDescription.resType = cudaResourceTypePitch2D;
+	textureResourceDescription.res.pitch2D.devPtr = d_lrii;
+	textureResourceDescription.res.pitch2D.desc = textureChannelDescription;
+	textureResourceDescription.res.pitch2D.width = RECTIFIED_IMAGE_WIDTH + 1;
+	textureResourceDescription.res.pitch2D.height = RECTIFIED_IMAGE_HEIGHT + 1;
+	textureResourceDescription.res.pitch2D.pitchInBytes = d_lriip;
+	d_lriip /= sizeof(int);
+	cudaTextureDesc textureDescription;
+	memset(&textureDescription, 0, sizeof(textureDescription));
+	textureDescription.addressMode[0] = cudaAddressModeClamp;
+	textureDescription.addressMode[1] = cudaAddressModeClamp;
+	textureDescription.filterMode = cudaFilterModePoint;
+	textureDescription.readMode = cudaReadModeElementType;
+	textureDescription.normalizedCoords = false;
+	memset(&t_lriii, 0, sizeof(t_lriii));
+	cudaCreateTextureObject(&t_lriii, &textureResourceDescription, &textureDescription, NULL);
+	cudaMallocPitch(&d_rrii, &d_rriip, (RECTIFIED_IMAGE_WIDTH + 1) * sizeof(int), RECTIFIED_IMAGE_HEIGHT + 1);
+	textureResourceDescription.res.pitch2D.devPtr = d_rrii;
+	textureResourceDescription.res.pitch2D.pitchInBytes = d_rriip;
+	d_rriip /= sizeof(int);
+	memset(&t_rriii, 0, sizeof(t_rriii));
+	cudaCreateTextureObject(&t_rriii, &textureResourceDescription, &textureDescription, NULL);
 	cudaMalloc(&d_ltri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
 	cudaMalloc(&d_rtri, RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char));
 }
@@ -64,10 +96,10 @@ void rectifyImages(unsigned char *l, unsigned char *r, unsigned char *o) {
 }
 
 void integrateImages() {
-	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_lrii, d_lri);
-	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_lrii);  
-	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_rrii, d_rri);
-	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_rrii);	
+	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_lrii, d_lriip, d_lri);
+	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_lrii, d_lriip);  
+	integrateImageVertically<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<VERTICAL_INTEGRATION_BLOCKS, VERTICAL_INTEGRATION_THREADS>>>(d_rrii, d_rriip, d_rri);
+	integrateImageHorizontally<RECTIFIED_IMAGE_WIDTH><<<HORIZONTAL_INTEGRATION_BLOCKS, HORIZONTAL_INTEGRATION_THREADS>>>(d_rrii, d_rriip);	
 }
 
 void transposeImages() {
@@ -89,6 +121,7 @@ __global__ void rectifyLeftImage(unsigned char *d_ri, unsigned char *d_di, int t
 		float l_df = l_sr * l_sr * SECOND_LEFT_DISTORTION_COEFFICIENT + l_sr * FIRST_LEFT_DISTORTION_COEFFICIENT + 1.0;
 		float l_dc = l_ux * l_df * LEFT_HORIZONTAL_FOCAL_LENGTH + LEFT_HORIZONTAL_PRINCIPAL_POINT;
 		float l_dr = l_uy * l_df * LEFT_VERTICAL_FOCAL_LENGTH + LEFT_VERTICAL_PRINCIPAL_POINT;
+		//offset texture coordinates by 0.5?
 		d_ri[l_c + (l_r + l_ro) * w] = (unsigned char) (tex2D(t_di, l_dc + t_dio, l_dr) * UCHAR_MAX);
 	}
 }
@@ -112,7 +145,7 @@ __global__ void rectifyRightImage(unsigned char *d_ri, unsigned char *d_di, int 
 }
 
 template<int w, int h>
-__global__ void integrateImageVertically(int *d_rii, unsigned char *d_ri) {
+__global__ void integrateImageVertically(int *d_rii, int d_riip, unsigned char *d_ri) {
 	int l_c = threadIdx.x + blockIdx.x * blockDim.x;
 	if (l_c < w + 1) {
 		d_rii[l_c] = 0;
@@ -120,20 +153,20 @@ __global__ void integrateImageVertically(int *d_rii, unsigned char *d_ri) {
 		if (l_c > 0)
 			for (int l_r = 1; l_r < h + 1; l_r++) {
 				l_s += d_ri[l_c - 1 + (l_r - 1) * w];
-				d_rii[l_c + l_r * (w + 1)] = l_s;
+				d_rii[l_c + l_r * d_riip] = l_s;
 			}
 		else
 			for (int l_r = 1; l_r < h + 1; l_r++)
-				d_rii[l_r * (w + 1)] = 0;
+				d_rii[l_r * d_riip] = 0;
 	}
 }
 
-template<int w, int h>
-__global__ void integrateImageHorizontally(int *d_rii) {
+template<int w>
+__global__ void integrateImageHorizontally(int *d_rii, int d_riip) {
 	int l_r = blockIdx.x + 1;
 	volatile __shared__ int s_b[2][w + 1];
 	for (int l_c = threadIdx.x; l_c < w + 1; l_c += blockDim.x)
-		s_b[0][l_c] = d_rii[l_c + l_r * (w + 1)];	
+		s_b[0][l_c] = d_rii[l_c + l_r * d_riip];	
 	int l_i = 0;
 	for (int l_co = 1; w - l_co > -1; l_co <<= 1) {
 		__syncthreads();
@@ -145,7 +178,7 @@ __global__ void integrateImageHorizontally(int *d_rii) {
 		l_i = 1 - l_i;
 	}
 	for (int l_c = threadIdx.x; l_c < w + 1; l_c += blockDim.x)
-		d_rii[l_c + l_r * (w + 1)] = s_b[l_i][l_c];
+		d_rii[l_c + l_r * d_riip] = s_b[l_i][l_c];
 }
 
 template<int w, int h>
