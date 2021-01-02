@@ -4,15 +4,16 @@
 #include "png.hpp"
 #include "pre.cuh"
 
+#define COMPUTATION_THREADS 128
+#define COMPUTATION_BLOCKS ((RECTIFIED_IMAGE_HEIGHT + COMPUTATION_THREADS - 1) / COMPUTATION_THREADS * 2)
+
 #define MAXIMUM_DISPARITY UCHAR_MAX
 #define OCCLUSION_COST 300.0f
 
-#define MATCH 1
-#define LEFT_OCCLUSION 2
-#define RIGHT_OCCLUSION 3
+#define MATCH_TRANSITION 1
+#define LEFT_OCCLUSION_TRANSITION 2
+#define RIGHT_OCCLUSION_TRANSITION 3
 
-#define COMPUTATION_THREADS 128
-#define COMPUTATION_BLOCKS ((RECTIFIED_IMAGE_HEIGHT + COMPUTATION_THREADS - 1) / COMPUTATION_THREADS * 2)
 #define RECONSTRUCTION_BLOCKS ((RECTIFIED_IMAGE_HEIGHT + COMPUTATION_THREADS - 1) / COMPUTATION_THREADS)
 
 #define PROPAGATION_THREADS 128
@@ -73,9 +74,8 @@ __global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, u
 		computeSolutionsLeftwards<w, h>(d_ltri, d_rtri, d_tt, d_ct, d_ttp, d_ctp);
 }
 
-//rename these
-#define cost(row, column, offset) d_ct[row + d_ctp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
-#define map(row, column, offset) d_tt[row + d_ttp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
+#define tt(row, column, offset) d_tt[row + d_ttp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
+#define ct(row, column, offset) d_ct[row + d_ctp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
 
 template<int w, int h>
 __global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
@@ -84,7 +84,7 @@ __global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, flo
 		float l_mc = FLT_MAX;
 		int l_mi = -1;
 		for (int l_do = 0; l_do < MAXIMUM_DISPARITY + 1; l_do++) {
-			float l_c = cost(l_r, (w / 2 - 1) % 2, l_do) + cost(l_r, (w - 1) / 2 % 2 + 2, l_do);
+			float l_c = ct(l_r, (w / 2 - 1) % 2, l_do) + ct(l_r, (w - 1) / 2 % 2 + 2, l_do);
 			if (l_c < l_mc) {
 				l_mc = l_c;
 				l_mi = l_do;
@@ -93,26 +93,25 @@ __global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, flo
 		int l_co = w / 2 - 1;
 		unsigned char l_do = l_mi;
 		while (l_co > -1) {
-			unsigned char l_t = map(l_r, l_co, l_do);
-			if (l_t == MATCH) {
+			unsigned char l_t = tt(l_r, l_co, l_do);
+			if (l_t == MATCH_TRANSITION) {
 				d_b[l_r + l_co * h] = MAXIMUM_DISPARITY - l_do;
 				l_co--;
-			} else if (l_t == LEFT_OCCLUSION) {
+			} else if (l_t == LEFT_OCCLUSION_TRANSITION) {
 				d_b[l_r + l_co * h] = 0;
 				l_co--;
 				l_do++;
 			} else
 				l_do--;
 		}
-		//test
 		l_co = w / 2;
 		l_do = l_mi;
 		while (l_co < w) {
-			unsigned char l_map = map(l_r, l_co, l_do);
-			if (l_map == MATCH) {
+			unsigned char l_map = tt(l_r, l_co, l_do);
+			if (l_map == MATCH_TRANSITION) {
 				d_b[l_r + l_co * h] = MAXIMUM_DISPARITY - l_do;
 				l_co++;
-			} else if (l_map == LEFT_OCCLUSION) {
+			} else if (l_map == LEFT_OCCLUSION_TRANSITION) {
 				d_b[l_r + l_co * h] = 0;
 				l_co++;
 				l_do--;
@@ -145,7 +144,6 @@ __global__ void propagateDiscontinuities(unsigned char *d_b2, unsigned char *d_b
 	}
 }
 
-//does not invalidate border pixels
 template<int w, int h>
 __global__ void propagateOcclusions(unsigned char *d_b2, unsigned char *d_b1) {
 	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
@@ -169,8 +167,8 @@ __device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char 
 	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
 	if (l_r < h) {
 		for (int l_do = 0; l_do < MAXIMUM_DISPARITY; l_do++) {
-			cost(l_r, 0, l_do) = OCCLUSION_COST;
-			map(l_r, 0, l_do) = LEFT_OCCLUSION;
+			ct(l_r, 0, l_do) = OCCLUSION_COST;
+			tt(l_r, 0, l_do) = LEFT_OCCLUSION_TRANSITION;
 		}
 		float l_lp = d_ltri[l_r];
 		float l_rp = d_rtri[l_r];
@@ -178,11 +176,11 @@ __device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char 
 		float l_roc = OCCLUSION_COST * 2;
 		float l_c = fminf(l_mc, l_roc);
 		int l_i = 0;
-		cost(l_r, l_i, MAXIMUM_DISPARITY) = l_c;
+		ct(l_r, l_i, MAXIMUM_DISPARITY) = l_c;
 		if (l_c == l_mc)
-			map(l_r, 0, MAXIMUM_DISPARITY) = MATCH;
+			tt(l_r, 0, MAXIMUM_DISPARITY) = MATCH_TRANSITION;
 		else
-			map(l_r, 0, MAXIMUM_DISPARITY) = RIGHT_OCCLUSION;
+			tt(l_r, 0, MAXIMUM_DISPARITY) = RIGHT_OCCLUSION_TRANSITION;
 		float l_loc;
 		int l_do;
 		for (int l_co = 1; l_co < w / 2; l_co++) {
@@ -190,45 +188,45 @@ __device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char 
 			l_lp = d_ltri[l_r + l_co * h];
 			if (l_co < MAXIMUM_DISPARITY) {
 				for (int l_offset = 0; l_offset < MAXIMUM_DISPARITY - l_co; l_offset++) {
-					cost(l_r, l_i, l_offset) = cost(l_r, 1 - l_i, l_offset + 1) + OCCLUSION_COST;
-					map(l_r, l_co, l_offset) = LEFT_OCCLUSION;
+					ct(l_r, l_i, l_offset) = ct(l_r, 1 - l_i, l_offset + 1) + OCCLUSION_COST;
+					tt(l_r, l_co, l_offset) = LEFT_OCCLUSION_TRANSITION;
 				}
 				l_do = MAXIMUM_DISPARITY - l_co;
 			} else {
 				l_rp = d_rtri[l_r + (l_co - MAXIMUM_DISPARITY) * h];
-				l_mc = cost(l_r, 1 - l_i, 0) + (l_lp - l_rp) * (l_lp - l_rp);
-				l_loc = cost(l_r, 1 - l_i, 1) + OCCLUSION_COST;
+				l_mc = ct(l_r, 1 - l_i, 0) + (l_lp - l_rp) * (l_lp - l_rp);
+				l_loc = ct(l_r, 1 - l_i, 1) + OCCLUSION_COST;
 				l_c = fminf(l_mc, l_loc);
-				cost(l_r, l_i, 0) = l_c;
+				ct(l_r, l_i, 0) = l_c;
 				if (l_c == l_mc)
-					map(l_r, l_co, 0) = MATCH;
+					tt(l_r, l_co, 0) = MATCH_TRANSITION;
 				else
-					map(l_r, l_co, 0) = LEFT_OCCLUSION;
+					tt(l_r, l_co, 0) = LEFT_OCCLUSION_TRANSITION;
 				l_do = 1;
 			}
 			for (; l_do < MAXIMUM_DISPARITY; l_do++) {
 				l_rp = d_rtri[l_r + (l_co - MAXIMUM_DISPARITY + l_do) * h];
-				l_mc = cost(l_r, 1 - l_i, l_do) + (l_lp - l_rp) * (l_lp - l_rp);
-				l_loc = cost(l_r, 1 - l_i, l_do + 1) + OCCLUSION_COST;
-				l_roc = cost(l_r, l_i, l_do - 1) + OCCLUSION_COST;
+				l_mc = ct(l_r, 1 - l_i, l_do) + (l_lp - l_rp) * (l_lp - l_rp);
+				l_loc = ct(l_r, 1 - l_i, l_do + 1) + OCCLUSION_COST;
+				l_roc = ct(l_r, l_i, l_do - 1) + OCCLUSION_COST;
 				l_c = fminf(fminf(l_mc, l_loc), l_roc);
-				cost(l_r, l_i, l_do) = l_c;
+				ct(l_r, l_i, l_do) = l_c;
 				if (l_c == l_mc)
-					map(l_r, l_co, l_do) = MATCH;
+					tt(l_r, l_co, l_do) = MATCH_TRANSITION;
 				else if (l_c == l_roc)
-					map(l_r, l_co, l_do) = RIGHT_OCCLUSION;
+					tt(l_r, l_co, l_do) = RIGHT_OCCLUSION_TRANSITION;
 				else
-					map(l_r, l_co, l_do) = LEFT_OCCLUSION;
+					tt(l_r, l_co, l_do) = LEFT_OCCLUSION_TRANSITION;
 			}
 			l_rp = d_rtri[l_r + l_co * h];
-			l_mc = cost(l_r, 1 - l_i, MAXIMUM_DISPARITY) + (l_lp - l_rp) * (l_lp - l_rp);
-			l_roc = cost(l_r, l_i, MAXIMUM_DISPARITY - 1) + OCCLUSION_COST;
+			l_mc = ct(l_r, 1 - l_i, MAXIMUM_DISPARITY) + (l_lp - l_rp) * (l_lp - l_rp);
+			l_roc = ct(l_r, l_i, MAXIMUM_DISPARITY - 1) + OCCLUSION_COST;
 			l_c = fminf(l_mc, l_roc);
-			cost(l_r, l_i, MAXIMUM_DISPARITY) = l_c;
+			ct(l_r, l_i, MAXIMUM_DISPARITY) = l_c;
 			if (l_c == l_mc)
-				map(l_r, l_co, MAXIMUM_DISPARITY) = MATCH;
+				tt(l_r, l_co, MAXIMUM_DISPARITY) = MATCH_TRANSITION;
 			else
-				map(l_r, l_co, MAXIMUM_DISPARITY) = RIGHT_OCCLUSION;
+				tt(l_r, l_co, MAXIMUM_DISPARITY) = RIGHT_OCCLUSION_TRANSITION;
 		}
 	}
 }
@@ -243,59 +241,59 @@ __device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *
 		float l_lc = OCCLUSION_COST * 2;
 		float l_c = fminf(l_mc, l_lc);
 		int l_i = 0;
-		cost(l_r, l_i + 2, MAXIMUM_DISPARITY) = l_c;
+		ct(l_r, l_i + 2, MAXIMUM_DISPARITY) = l_c;
 		if (l_c == l_mc)
-			map(l_r, w - 1, MAXIMUM_DISPARITY) = MATCH;
+			tt(l_r, w - 1, MAXIMUM_DISPARITY) = MATCH_TRANSITION;
 		else
-			map(l_r, w - 1, MAXIMUM_DISPARITY) = LEFT_OCCLUSION;
+			tt(l_r, w - 1, MAXIMUM_DISPARITY) = LEFT_OCCLUSION_TRANSITION;
 		float l_rc;
 		for (int l_do = MAXIMUM_DISPARITY - 1; l_do > -1; l_do--) {
 			l_ri = d_rtri[l_r + (w - 1 - MAXIMUM_DISPARITY + l_do) * h];
 			l_mc = OCCLUSION_COST + (l_li - l_ri) * (l_li - l_ri);
-			l_rc = cost(l_r, l_i + 2, l_do + 1) + OCCLUSION_COST;
+			l_rc = ct(l_r, l_i + 2, l_do + 1) + OCCLUSION_COST;
 			l_c = fminf(l_mc, l_rc);
-			cost(l_r, l_i + 2, l_do) = l_c;
+			ct(l_r, l_i + 2, l_do) = l_c;
 			if (l_c == l_mc)
-				map(l_r, w - 1, l_do) = MATCH;
+				tt(l_r, w - 1, l_do) = MATCH_TRANSITION;
 			else
-				map(l_r, w - 1, l_do) = RIGHT_OCCLUSION;
+				tt(l_r, w - 1, l_do) = RIGHT_OCCLUSION_TRANSITION;
 		}
 		for (int l_co = w - 2; l_co > w / 2 - 1; l_co--) {
 			l_i = 1 - l_i;
 			l_li = d_ltri[l_r + l_co * h];
 			l_ri = d_rtri[l_r + l_co * h];
-			l_mc = cost(l_r, 3 - l_i, MAXIMUM_DISPARITY) + (l_li - l_ri) * (l_li - l_ri);
-			l_lc = cost(l_r, 3 - l_i, MAXIMUM_DISPARITY - 1) + OCCLUSION_COST;
+			l_mc = ct(l_r, 3 - l_i, MAXIMUM_DISPARITY) + (l_li - l_ri) * (l_li - l_ri);
+			l_lc = ct(l_r, 3 - l_i, MAXIMUM_DISPARITY - 1) + OCCLUSION_COST;
 			l_c = fminf(l_mc, l_lc);
-			cost(l_r, l_i + 2, MAXIMUM_DISPARITY) = l_c;
+			ct(l_r, l_i + 2, MAXIMUM_DISPARITY) = l_c;
 			if (l_c == l_mc)
-				map(l_r, l_co, MAXIMUM_DISPARITY) = MATCH;
+				tt(l_r, l_co, MAXIMUM_DISPARITY) = MATCH_TRANSITION;
 			else
-				map(l_r, l_co, MAXIMUM_DISPARITY) = LEFT_OCCLUSION;
+				tt(l_r, l_co, MAXIMUM_DISPARITY) = LEFT_OCCLUSION_TRANSITION;
 			for (int l_do = MAXIMUM_DISPARITY - 1; l_do > 0; l_do--) {
 				l_ri = d_rtri[l_r + (l_co - MAXIMUM_DISPARITY + l_do) * h];
-				l_mc = cost(l_r, 3 - l_i, l_do) + (l_li - l_ri) * (l_li - l_ri);
-				l_lc = cost(l_r, 3 - l_i, l_do - 1) + OCCLUSION_COST;
-				l_rc = cost(l_r, l_i + 2, l_do + 1) + OCCLUSION_COST;
+				l_mc = ct(l_r, 3 - l_i, l_do) + (l_li - l_ri) * (l_li - l_ri);
+				l_lc = ct(l_r, 3 - l_i, l_do - 1) + OCCLUSION_COST;
+				l_rc = ct(l_r, l_i + 2, l_do + 1) + OCCLUSION_COST;
 				l_c = fminf(fminf(l_mc, l_lc), l_rc);
-				cost(l_r, l_i + 2, l_do) = l_c;
+				ct(l_r, l_i + 2, l_do) = l_c;
 				if (l_c == l_mc)
-					map(l_r, l_co, l_do) = MATCH;
+					tt(l_r, l_co, l_do) = MATCH_TRANSITION;
 				else if (l_c == l_rc)
-					map(l_r, l_co, l_do) = RIGHT_OCCLUSION;
+					tt(l_r, l_co, l_do) = RIGHT_OCCLUSION_TRANSITION;
 				else
-					map(l_r, l_co, l_do) = LEFT_OCCLUSION;
+					tt(l_r, l_co, l_do) = LEFT_OCCLUSION_TRANSITION;
 
 			}
 			l_ri = d_rtri[l_r + (l_co - MAXIMUM_DISPARITY) * h];
-			l_mc = cost(l_r, 3 - l_i, 0) + (l_li - l_ri) * (l_li - l_ri);
-			l_rc = cost(l_r, l_i + 2, 1) + OCCLUSION_COST;
+			l_mc = ct(l_r, 3 - l_i, 0) + (l_li - l_ri) * (l_li - l_ri);
+			l_rc = ct(l_r, l_i + 2, 1) + OCCLUSION_COST;
 			l_c = fminf(l_mc, l_rc);
-			cost(l_r, l_i + 2, 0) = l_c;
+			ct(l_r, l_i + 2, 0) = l_c;
 			if (l_c == l_mc)
-				map(l_r, l_co, 0) = MATCH;
+				tt(l_r, l_co, 0) = MATCH_TRANSITION;
 			else
-				map(l_r, l_co, 0) = RIGHT_OCCLUSION;
+				tt(l_r, l_co, 0) = RIGHT_OCCLUSION_TRANSITION;
 		}
 	}
 }
