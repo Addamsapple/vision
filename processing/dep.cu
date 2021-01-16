@@ -29,7 +29,7 @@ size_t d_ctp;
 template<int w, int h>
 __global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
 template<int w, int h>
-__global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
+__global__ void reconstructBestSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
 template<int w, int h>
 __global__ void propagateDiscontinuities(unsigned char *d_b2, unsigned char *d_b1);
 template<int w, int h>
@@ -49,7 +49,7 @@ void initializeDisparityMapComputation() {
 
 void computeDisparityMap() {
 	computeSolutions<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<COMPUTATION_BLOCKS, COMPUTATION_THREADS>>>(d_ltri, d_rtri, d_tt, d_ct, d_ttp, d_ctp);
-	reconstructSolution<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<RECONSTRUCTION_BLOCKS, COMPUTATION_THREADS>>>(d_ltri, d_tt, d_ct, d_ttp, d_ctp);
+	reconstructBestSolution<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<RECONSTRUCTION_BLOCKS, COMPUTATION_THREADS>>>(d_ltri, d_tt, d_ct, d_ttp, d_ctp);
 }
 
 void refineDisparityMap(unsigned char *a, int iterations) {
@@ -78,7 +78,7 @@ __global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, u
 #define ct(row, column, offset) d_ct[row + d_ctp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
 
 template<int w, int h>
-__global__ void reconstructSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
+__global__ void reconstructBestSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
 	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
 	if (l_r < h) {
 		float l_mc = FLT_MAX;
