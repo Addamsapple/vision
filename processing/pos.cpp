@@ -1,35 +1,40 @@
-//suggested camera frame: x axis - towards left of image, y axis - towards top of image, z axis, towards camera direction.
-
-/*
-TODO:
--solution pruning,
--angle determination
--substitute repeated products with power functions?
-*/
-
-//dont use chars where not necessary
+#include <algorithm>
 
 #include <cmath>
 #include <iostream>
 
-const double fx = 1.0f;
-const double fy = 1.0f;
+#include <iomanip>
 
-const unsigned char REFINEMENT_ITERATIONS = 15;
-const unsigned char FACTORIZATION_ITERATIONS = 10;
+#include "cam.hpp"
+
+//todo: check performance of doubles for polynomial roots
+
+//solution sometimes not found, even for valid inputs, because roots of quartic polynomial do not converge within the number of iterations used (20 and 10)
+
+#define REFINEMENT_ITERATIONS 20
+#define FACTORIZATION_ITERATIONS 20
 
 #define POLYNOMIAL_DEGREE 4
 
-const float EPSILON = 0.01f;
+const float POSE_EPSILON = 0.01f;
 
 //reorder method definitions
+
+void pose(float *outputR, float *outputT, float *matrixI, float *matrixW);
 
 void computePolynomialRoots(float *roots, float *polynomial);
 void refinePolynomialRoots(float *roots, float *polynomial);
 void trilaterateCameraPosition(float *T, float *X, float *D, int configurations);
 void computeQRFactorization(float *Q, float *R, float *A);
 
+void computeBestSolution(int *bestSolution, float *matrixU, float *matrixR, float *matrixW, float *vectorT, int solutions);
+
+void constructPolynomial(float *polynomialCoefficients, float *tetrahedronAngles, float *tetrahedronSideLengthRatios);
+
+void computeFeatureRadii(float *featureRayLengths, int *configurations, float *polynomialRoots, float *polynomialCoefficients, float *tetrahedronAngles, float *tetrahedronSideLengths, float *tetrahedronSideLengthRatios);
 void computeCameraRotation(float *rotationMatrices, float *cameraPositions, float *featureWorldPositions, float *featureCameraPositions, int solutions);
+
+void unprojectPixel(float *ray, float *pixel);
 
 void multiplyMatrices(float *A, float *B, float *C, int size);
 void invertMatrix(float *A, int size);
@@ -44,119 +49,181 @@ float vectorDotProduct(float *A, float *B, int size);
 float vectorDistance(float *A, float *B, int size);
 float vectorMagnitude(float *A, int size);
 
-void pose(float *I, float *X) {
-	for (int point = 0; point < 3; point++) {
-		I[point * 3] /= fx; I[point * 3 + 1] /= fy;
-		I[point * 3 + 1] /= fy;
-		normalizeVector(I + point * 3, 3);
+#define Cab cosines[0]
+#define Cac cosines[1]
+#define Cbc cosines[2]
+
+#define Rab distances[0]
+#define Rac distances[1]
+#define Rbc distances[2]
+
+#define K1 ratios[0]
+#define K2 ratios[1]
+
+void unprojectPixel(float *ray, float *point) {
+	ray[0] = point[0];//(point[0] - HORIZONTAL_PRINCIPAL_POINT) / HORIZONTAL_FOCAL_LENGTH
+	ray[1] = point[1];//(point[1] - VERTICAL_PRINCIPAL_POINT) / VERTICAL_FOCAL_LENGTH
+	ray[2] = 1.0f;
+	normalizeVector(ray, 3);
+}
+
+void projectPoint(float *image, float *world, float *vectorT, float *matrixR) {
+	float translatedVector[3];
+	combineVectors(translatedVector, world, vectorT, 1.0f, -1.0f, 3);
+	float z = matrixInnerProduct(translatedVector, matrixR + 2, 3);
+	image[0] = matrixInnerProduct(translatedVector, matrixR, 3) / z;
+	image[1] = matrixInnerProduct(translatedVector, matrixR + 1, 3) / z;
+}
+
+void computeReprojectionError(float *reprojectionError, float *matrixR, float *world, float *image, float *vectorT) {
+	float reprojectedPixel[2];
+	projectPoint(reprojectedPixel, world, vectorT, matrixR);
+	*reprojectionError = (reprojectedPixel[0] - image[0]) * (reprojectedPixel[0] - image[0]) + (reprojectedPixel[1] - image[1]) * (reprojectedPixel[1] - image[1]);
+	std::cout << std::setw(15) << reprojectedPixel[0] << std::setw(15) << reprojectedPixel[1] << std::setw(15) << *reprojectionError << "\n";
+}
+
+#define RANSAC_ALGORITHM_EXECUTIONS 10
+
+void performRandomSampleConsensus(int numPoints, float *matI, float *matW) {
+	std::srand(0);
+	float matrixI[4 * 3];
+	float matrixW[4 * 3];
+	float matrixR[3 * 3];
+	float vectorT[3];
+	for (int i = 0; i < RANSAC_ALGORITHM_EXECUTIONS; i++) {
+		int points[4];
+		for (int point = 0; point < 4; point++) {
+			randomize: points[point] = (int) ((float) rand() * numPoints / (RAND_MAX + 1.0f));
+			for (int priorPoint = 0; priorPoint < point; priorPoint++)
+				if (points[point] == points[priorPoint])
+					goto randomize;
+		}
+		for (int point = 0; point < 4; point++) {
+			memcpy(matrixI + (long long) point * 3, matI + (long long) points[point] * 3, sizeof(float) * 3);
+			memcpy(matrixW + (long long) point * 3, matW + (long long) points[point] * 3, sizeof(float) * 3);
+		}
+		std::cout << "iteration " << i << "\n";
+		pose(matrixR, vectorT, matrixI, matrixW);
+		std::cout << "\n\n\n";
 	}
-	float Cab = vectorDotProduct(I, I + 3, 3), Cac = vectorDotProduct(I, I + 6, 3), Cbc = vectorDotProduct(I + 3, I + 6, 3);
-	float Rab = vectorDistance(X, X + 3, 3), Rac = vectorDistance(X, X + 6, 3), Rbc = vectorDistance(X + 3, X + 6, 3);
-	float K1 = Rbc * Rbc / (Rac * Rac), K2 = Rbc * Rbc / (Rab * Rab);
-	float *polynomial = new float[5];
-	polynomial[4] = (K1 * K2 - K1 - K2) * (K1 * K2 - K1 - K2) - 4.0f * K1 * K2 * Cbc * Cbc;
-	polynomial[0] = ((K1 * K2 + K1 - K2) * (K1 * K2 + K1 - K2) - 4.0f * K1 * K1 * K2 * Cac * Cac) / polynomial[4];
-	polynomial[1] = (4.0f * (K1 * K2 + K1 - K2) * K2 * (1.0f - K1) * Cab + 4.0f * K1 * ((K1 * K2 - K1 + K2) * Cac * Cbc + 2.0f * K1 * K2 * Cab * Cac * Cac)) / polynomial[4];
-	polynomial[2] = ((2.0f * K2 * (1 - K1) * Cab) * (2.0f * K2 * (1.0f - K1) * Cab) + 2.0f * (K1 * K2 - K1 - K2) * (K1 * K2 + K1 - K2) + 4.0f * K1 * ((K1 - K2) * Cbc * Cbc + K1 * (1.0f - K2) * Cac * Cac - 2.0f * (1.0f + K1) * K2 * Cab * Cac * Cbc)) / polynomial[4];
-	polynomial[3] = (4.0f * (K1 * K2 - K1 - K2) * K2 * (1.0f - K1) * Cab + 4.0f * K1 * Cbc * ((K1 * K2 - K1 + K2) * Cac + 2.0f * K2 * Cab * Cbc)) / polynomial[4];
-	polynomial[4] = 1.0f;
-	float *roots = new float[4];
-	computePolynomialRoots(roots, polynomial);
-	refinePolynomialRoots(roots, polynomial);
-	float *D = new float[4 * 3];
-	int configurations = 0;
-	for (int root = 0; root < 4; root++) {
-		float x = roots[root];
-		float xx = x * x;
-		float xxx = xx * x;
-		float xxxx = xxx * x;
-		if (std::abs(polynomial[4] * xxxx + polynomial[3] * xxx + polynomial[2] * xx + polynomial[1] * x + polynomial[0]) < EPSILON) {
-			if (root > 0 && std::abs(roots[root - 1] - x) < EPSILON)
+}
+
+void pose(float *outputR, float *outputT, float *matrixI, float *matrixW) {
+	float unprojectedPixels[3 * 3];
+	for (int point = 0; point < 3; point++)
+		unprojectPixel(unprojectedPixels + (long long) point * 3, matrixI + (long long) point * 3);
+	float cosines[3] = {vectorDotProduct(unprojectedPixels, unprojectedPixels + 3, 3), vectorDotProduct(unprojectedPixels, unprojectedPixels + 6, 3), vectorDotProduct(unprojectedPixels + 3, unprojectedPixels + 6, 3)};
+	float distances[3] = {vectorDistance(matrixW, matrixW + 3, 3), vectorDistance(matrixW, matrixW + 6, 3), vectorDistance(matrixW + 3, matrixW + 6, 3)};
+	float ratios[2] = {Rbc * Rbc / (Rac * Rac), Rbc * Rbc / (Rab * Rab)};
+	float polynomialCoefficients[POLYNOMIAL_DEGREE + 1];
+	constructPolynomial(polynomialCoefficients, cosines, ratios);
+	float roots[POLYNOMIAL_DEGREE];
+	computePolynomialRoots(roots, polynomialCoefficients);
+	refinePolynomialRoots(roots, polynomialCoefficients);
+	float featureRadii[POLYNOMIAL_DEGREE * 2 * 3];
+	int configurations;
+	computeFeatureRadii(featureRadii, &configurations, roots, polynomialCoefficients, cosines, distances, ratios);
+	float vectorT[POLYNOMIAL_DEGREE * 2 * 3];
+	trilaterateCameraPosition(vectorT, matrixW, featureRadii, configurations);
+	float matrixR[POLYNOMIAL_DEGREE * 2 * 3 * 3];
+	computeCameraRotation(matrixR, vectorT, unprojectedPixels, matrixW, configurations * 2);
+	int bestSolution;
+	computeBestSolution(&bestSolution, matrixI, matrixR, matrixW, vectorT, configurations * 2);
+	memcpy(outputR, matrixR + (long long) bestSolution * 3 * 3, sizeof(float) * 3 * 3);
+	memcpy(outputT, vectorT + (long long) bestSolution * 3, sizeof(float) * 3);
+}
+
+void computeBestSolution(int *bestSolution, float *matrixU, float *matrixR, float *matrixW, float *vectorT, int solutions) {
+	float translatedVector[3];
+	float minimumError = FLT_MAX;
+	*bestSolution = 0;
+	for (int solution = 0; solution < solutions; solution++) {
+		combineVectors(translatedVector, matrixW + 3 * 3, vectorT + (long long) solution * 3, 1.0f, -1.0f, 3);
+		float reprojectionError;
+		computeReprojectionError(&reprojectionError, matrixR + (long long) solution * 3 * 3, matrixW + 3 * 3, matrixU + 3 * 3, vectorT + (long long) solution * 3);
+		if (reprojectionError < minimumError) {
+			minimumError = reprojectionError;
+			*bestSolution = solution;
+		}
+	}
+}
+
+void computeFeatureRadii(float *featureRadii, int *configurations, float *polynomialRoots, float *polynomialCoefficients, float *cosines, float *distances, float *ratios) {
+	*configurations = 0;
+	for (int root = 0; root < POLYNOMIAL_DEGREE; root++) {
+		float rootPowers[POLYNOMIAL_DEGREE + 1];
+		rootPowers[0] = 1.0f;
+		float function = polynomialCoefficients[0];
+		for (int power = 1; power < POLYNOMIAL_DEGREE + 1; power++) {
+			rootPowers[power] = polynomialRoots[root] * rootPowers[power - 1];
+			function += polynomialCoefficients[power] * rootPowers[power];
+		}
+		if (std::abs(function) < POSE_EPSILON) {
+			if (root > 0 && std::abs(polynomialRoots[root - 1] - rootPowers[1]) < POSE_EPSILON)
 				continue;
-			float a = Rab / std::sqrt(xx - 2.0f * x * Cab + 1.0f);
-			float b = a * x;
-			float m = 1.0f - K1, mp = 1.0f;
-			float q = xx - K1, qp = (1.0f - K2) * xx + 2.0f * K2 * Cab * x - K2;
-			if (std::abs(m * qp - mp * q) > EPSILON) {
-				float p = 2.0f * (K1 * Cac - Cbc * x), pp = -2.0f * Cbc * x;
+			float a = Rab / std::sqrt(rootPowers[2] - 2.0f * rootPowers[1] * Cab + 1.0f);
+			float b = a * rootPowers[1];
+			float m = 1.0f - K1;
+			float mp = 1.0f;
+			float q = rootPowers[2] - K1;
+			float qp = (1.0f - K2) * rootPowers[2] + 2.0f * K2 * Cab * rootPowers[1] - K2;
+			if (std::abs(m * qp - mp * q) > POSE_EPSILON) {
+				float p = 2.0f * (K1 * Cac - Cbc * rootPowers[1]);
+				float pp = -2.0f * Cbc * rootPowers[1];
 				float y = (pp * q - p * qp) / (m * qp - mp * q);
 				float c = a * y;
-				D[configurations * 3] = a; D[configurations * 3 + 1] = b; D[configurations * 3 + 2] = c;
-				configurations++;
+				featureRadii[*configurations * 3] = a;
+				featureRadii[1 + *configurations * 3] = b;
+				featureRadii[2 + *configurations * 3] = c;
+				(*configurations)++;
 			} else {
-				float y[2] = {Cac - std::sqrt(Cac * Cac + Rac * Rac / (a * a) - 1.0f), 0.0f}; y[1] = 2.0f * Cac - y[0];
+				float y[2] = {Cac - std::sqrt(Cac * Cac + Rac * Rac / (a * a) - 1.0f), 0.0f};
+				y[1] = 2.0f * Cac - y[0];
 				float c[2] = {a * y[0], a * y[1]};
-				for (int index = 0; index < 2; index++)
-					if (std::abs(Rbc * Rbc - b * b - c[index] * c[index] + 2.0f * b * c[index] * Cbc) < EPSILON) {
-						D[configurations * 3] = a; D[1 + configurations * 3] = b; D[2 + configurations * 3] = c[index];//change indexing order
-						configurations++;
+				for (int configuration = 0; configuration < 2; configuration++)
+					if (std::abs(Rbc * Rbc - b * b - c[configuration] * c[configuration] + 2.0f * b * c[configuration] * Cbc) < POSE_EPSILON) {
+						featureRadii[*configurations * 3] = a;
+						featureRadii[1 + *configurations * 3] = b;
+						featureRadii[2 + *configurations * 3] = c[configuration];
+						(*configurations)++;
 					}
 			}
 		}
 	}
-	float *T = new float[(long long) configurations * 2 * 3];
-	trilaterateCameraPosition(T, X, D, configurations);
-	//
-	std::cout << T[0] << " " << T[1] << " " << T[2] << "\n";
-	std::cout << T[3] << " " << T[4] << " " << T[5] << "\n";
-	std::cout << T[6] << " " << T[7] << " " << T[8] << "\n";
-	std::cout << T[9] << " " << T[10] << " " << T[11] << "\n";
-	//
-	float *XT = new float[3 * 3];
-	float *V = new float[3 * 3];
-	float *R = new float[3 * 3];
-	/*for (int solution = 0; solution < configurations * 2; solution++) {
-		combineVectors(XT, X, T + (long long) solution * 3, 1.0f, -1.0f, 3);
-		combineVectors(XT + 3, X + 3, T + (long long) solution * 3, 1.0f, -1.0f, 3);
-		combineVectors(XT + 2 * 3, X + 2 * 3, T + (long long) solution * 3, 1.0f, -1.0f, 3);
-		scaleVector(V, I, vectorMagnitude(XT, 3), 3);
-		scaleVector(V + 3, I + 3, vectorMagnitude(XT + 3, 3), 3);
-		scaleVector(V + 2 * 3, I + 2 * 3, vectorMagnitude(XT + 2 * 3, 3), 3);
-		invertMatrix(XT, 3);
-		multiplyMatrices(R, XT, V, 3);
-		std::cout << "\n";
-		std::cout << R[0] << " " << R[1] << " " << R[2] << "\n";
-		std::cout << R[3] << " " << R[4] << " " << R[5] << "\n";
-		std::cout << R[6] << " " << R[7] << " " << R[8] << "\n";
-	}*/
-
-	computeCameraRotation(R, T, X, I, 4);
-
-	delete[] polynomial; delete[] roots; delete[] D; delete[] T; delete[] XT; delete[] V; delete[] R;
 }
 
-void computeCameraRotation(float *rotationMatrices, float *cameraPositions, float *featureWorldPositions, float *featureCameraPositions, int solutions) {
+void constructPolynomial(float *polynomialCoefficients, float *cosines, float *ratios) {
+	float leadingPolynomialCoefficient = (K1 * K2 - K1 - K2) * (K1 * K2 - K1 - K2) - 4.0f * K1 * K2 * Cbc * Cbc;
+	polynomialCoefficients[0] = ((K1 * K2 + K1 - K2) * (K1 * K2 + K1 - K2) - 4.0f * K1 * K1 * K2 * Cac * Cac) / leadingPolynomialCoefficient;
+	polynomialCoefficients[1] = (4.0f * (K1 * K2 + K1 - K2) * K2 * (1.0f - K1) * Cab + 4.0f * K1 * ((K1 * K2 - K1 + K2) * Cac * Cbc + 2.0f * K1 * K2 * Cab * Cac * Cac)) / leadingPolynomialCoefficient;
+	polynomialCoefficients[2] = ((2.0f * K2 * (1.0f - K1) * Cab) * (2.0f * K2 * (1.0f - K1) * Cab) + 2.0f * (K1 * K2 - K1 - K2) * (K1 * K2 + K1 - K2) + 4.0f * K1 * ((K1 - K2) * Cbc * Cbc + K1 * (1.0f - K2) * Cac * Cac - 2.0f * (1.0f + K1) * K2 * Cab * Cac * Cbc)) / leadingPolynomialCoefficient;
+	polynomialCoefficients[3] = (4.0f * (K1 * K2 - K1 - K2) * K2 * (1.0f - K1) * Cab + 4.0f * K1 * Cbc * ((K1 * K2 - K1 + K2) * Cac + 2.0f * K2 * Cab * Cbc)) / leadingPolynomialCoefficient;
+	polynomialCoefficients[4] = 1.0f;
+	std::cout << "x^4+" << polynomialCoefficients[3] << "x^3+" << polynomialCoefficients[2] << "x^2+" << polynomialCoefficients[1] << "x+" << polynomialCoefficients[0] << "\n";
+}
+
+void computeCameraRotation(float *matrixR, float *vectorT, float *matrixI, float *matrixW, int solutions) {
 	float translatedFeatureWorldPositions[3 * 3];
 	float scaledFeatureCameraPositions[3 * 3];
 	for (int solution = 0; solution < solutions; solution++) {
-		combineVectors(translatedFeatureWorldPositions, featureWorldPositions, cameraPositions + (long long) solution * 3, 1.0f, -1.0f, 3);
-		combineVectors(translatedFeatureWorldPositions + 3, featureWorldPositions + 3, cameraPositions + (long long) solution * 3, 1.0f, -1.0f, 3);
-		combineVectors(translatedFeatureWorldPositions + 2 * 3, featureWorldPositions + 2 * 3, cameraPositions + (long long) solution * 3, 1.0f, -1.0f, 3);
-		scaleVector(scaledFeatureCameraPositions, featureCameraPositions, vectorMagnitude(translatedFeatureWorldPositions, 3), 3);
-		scaleVector(scaledFeatureCameraPositions + 3, featureCameraPositions + 3, vectorMagnitude(translatedFeatureWorldPositions + 3, 3), 3);
-		scaleVector(scaledFeatureCameraPositions + 2 * 3, featureCameraPositions + 2 * 3, vectorMagnitude(translatedFeatureWorldPositions + 2 * 3, 3), 3);
+		combineVectors(translatedFeatureWorldPositions, matrixW, vectorT + (long long) solution * 3, 1.0f, -1.0f, 3);
+		combineVectors(translatedFeatureWorldPositions + 3, matrixW + 3, vectorT + (long long) solution * 3, 1.0f, -1.0f, 3);
+		combineVectors(translatedFeatureWorldPositions + 2 * 3, matrixW + 2 * 3, vectorT + (long long) solution * 3, 1.0f, -1.0f, 3);
+		scaleVector(scaledFeatureCameraPositions, matrixI, vectorMagnitude(translatedFeatureWorldPositions, 3), 3);
+		scaleVector(scaledFeatureCameraPositions + 3, matrixI + 3, vectorMagnitude(translatedFeatureWorldPositions + 3, 3), 3);
+		scaleVector(scaledFeatureCameraPositions + 2 * 3, matrixI + 2 * 3, vectorMagnitude(translatedFeatureWorldPositions + 2 * 3, 3), 3);
 		invertMatrix(translatedFeatureWorldPositions, 3);
-		multiplyMatrices(rotationMatrices, translatedFeatureWorldPositions, scaledFeatureCameraPositions, 3);
-		transposeMatrix(rotationMatrices, 3);
-		std::cout << "\n";
-		std::cout << rotationMatrices[0] << " " << rotationMatrices[1] << " " << rotationMatrices[2] << "\n";
-		std::cout << rotationMatrices[3] << " " << rotationMatrices[4] << " " << rotationMatrices[5] << "\n";
-		std::cout << rotationMatrices[6] << " " << rotationMatrices[7] << " " << rotationMatrices[8] << "\n";
-	
+		multiplyMatrices(matrixR + (long long) solution * 3 * 3, translatedFeatureWorldPositions, scaledFeatureCameraPositions, 3);
 	}
 }
 
-void computePolynomialRoots(float *roots, float *polynomialCoefficients) {
+void computePolynomialRoots(float *polynomialRoots, float *polynomialCoefficients) {
 	float matrixA[POLYNOMIAL_DEGREE * POLYNOMIAL_DEGREE];
 	float matrixQ[POLYNOMIAL_DEGREE * POLYNOMIAL_DEGREE];
 	float matrixR[POLYNOMIAL_DEGREE * POLYNOMIAL_DEGREE];
-	for (int row = 0; row < POLYNOMIAL_DEGREE - 1; row++) {
-		for (int column = 0; column < row + 1; column++)
-			matrixA[column + row * POLYNOMIAL_DEGREE] = 0;
+	memset(matrixA, 0, POLYNOMIAL_DEGREE * POLYNOMIAL_DEGREE * sizeof(float));
+	for (int row = 0; row < POLYNOMIAL_DEGREE - 1; row++)
 		matrixA[row + 1 + row * POLYNOMIAL_DEGREE] = 1;
-		for (int column = row + 2; column < POLYNOMIAL_DEGREE; column++)
-			matrixA[column + row * POLYNOMIAL_DEGREE] = 0;
-	}
 	for (int column = 0; column < POLYNOMIAL_DEGREE; column++)
 		matrixA[column + (POLYNOMIAL_DEGREE - 1) * POLYNOMIAL_DEGREE] = -polynomialCoefficients[column];
 	for (int iteration = 0; iteration < FACTORIZATION_ITERATIONS; iteration++) {
@@ -164,7 +231,7 @@ void computePolynomialRoots(float *roots, float *polynomialCoefficients) {
 		multiplyMatrices(matrixA, matrixR, matrixQ, POLYNOMIAL_DEGREE);
 	}
 	for (int root = 0; root < POLYNOMIAL_DEGREE; root++)
-		roots[root] = matrixA[root + root * POLYNOMIAL_DEGREE];
+		polynomialRoots[root] = matrixA[root + root * POLYNOMIAL_DEGREE];//I should probably sort these so I can skip duplicates
 }
 
 void computeQRFactorization(float *matrixQ, float *matrixR, float *matrixA) {
@@ -179,13 +246,13 @@ void computeQRFactorization(float *matrixQ, float *matrixR, float *matrixA) {
 	transposeMatrix(matrixQ, POLYNOMIAL_DEGREE);
 }
 
-void refinePolynomialRoots(float *roots, float *polynomialCoefficients) {
+void refinePolynomialRoots(float *polynomialRoots, float *polynomialCoefficients) {
 	float rootPowers[POLYNOMIAL_DEGREE + 1];
 	rootPowers[0] = 1.0f;
 	for (int root = 0; root < POLYNOMIAL_DEGREE; root++)
 		for (int iteration = 0; iteration < REFINEMENT_ITERATIONS; iteration++) {
 			for (int power = 1; power < POLYNOMIAL_DEGREE + 1; power++)
-				rootPowers[power] = rootPowers[power - 1] * roots[root];
+				rootPowers[power] = polynomialRoots[root] * rootPowers[power - 1];
 			float function = 0.0f;
 			float firstFunctionDerivative = 0.0f;
 			float secondFunctionDerivative = 0.0f;
@@ -195,15 +262,17 @@ void refinePolynomialRoots(float *roots, float *polynomialCoefficients) {
 				firstFunctionDerivative += term * polynomialCoefficients[term] * rootPowers[term - 1];
 			for (int term = 2; term < POLYNOMIAL_DEGREE + 1; term++)
 				secondFunctionDerivative += term * (term - 1) * polynomialCoefficients[term] * rootPowers[term - 2];
-			roots[root] -= function * firstFunctionDerivative / (firstFunctionDerivative * firstFunctionDerivative - function * secondFunctionDerivative * 0.5f);
+			polynomialRoots[root] -= function * firstFunctionDerivative / (firstFunctionDerivative * firstFunctionDerivative - function * secondFunctionDerivative * 0.5f);
 		}
+	std::sort(polynomialRoots, polynomialRoots + POLYNOMIAL_DEGREE);
+	std::cout << "roots: " << polynomialRoots[0] << " " << polynomialRoots[1] << " " << polynomialRoots[2] << " " << polynomialRoots[3] << "\n";
 }
 
-void trilaterateCameraPosition(float *cameraPositions, float *featurePositions, float *distances, int configurations) {
+void trilaterateCameraPosition(float *vectorT, float *matrixW, float *featureRadii, int configurations) {
 	float vectorB[3];
-	combineVectors(vectorB, featurePositions + 3, featurePositions, 1.0f, -1.0f, 3);
+	combineVectors(vectorB, matrixW + 3, matrixW, 1.0f, -1.0f, 3);
 	float vectorC[3];
-	combineVectors(vectorC, featurePositions + 2 * 3, featurePositions, 1.0f, -1.0f, 3);
+	combineVectors(vectorC, matrixW + 2 * 3, matrixW, 1.0f, -1.0f, 3);
 	float frameMatrix[3 * 3];
 	scaleVector(frameMatrix, vectorB, 1.0f, 3);
 	normalizeVector(frameMatrix, 3);
@@ -214,16 +283,20 @@ void trilaterateCameraPosition(float *cameraPositions, float *featurePositions, 
 	float vectorCXComponent = vectorDotProduct(vectorC, frameMatrix, 3);
 	float vectorCYComponent = vectorDotProduct(vectorC, frameMatrix + 3, 3);
 	for (int configuration = 0; configuration < configurations; configuration++) {
-		float camereXCoordinate = (distances[configuration * 3] * distances[configuration * 3] - distances[1 + configuration * 3] * distances[1 + configuration * 3] + vectorBXComponent * vectorBXComponent) / (2.0f * vectorBXComponent);
-		float cameraYCoordinate = (distances[configuration * 3] * distances[configuration * 3] - distances[2 + configuration * 3] * distances[2 + configuration * 3] + vectorCXComponent * vectorCXComponent + vectorCYComponent * vectorCYComponent - 2.0f * vectorCXComponent * camereXCoordinate) / (2.0f * vectorCYComponent);
-		float cameraZCoordinate = std::sqrt(distances[configuration * 3] * distances[configuration * 3] - camereXCoordinate * camereXCoordinate - cameraYCoordinate * cameraYCoordinate);
-		combineVectors(cameraPositions + (long long) configuration * 2 * 3, featurePositions, frameMatrix, 1.0f, camereXCoordinate, 3);
-		combineVectors(cameraPositions + (long long) configuration * 2 * 3, cameraPositions + (long long) configuration * 2 * 3, frameMatrix + 3, 1.0f, cameraYCoordinate, 3);
-		combineVectors(cameraPositions + (long long) configuration * 2 * 3, cameraPositions + (long long) configuration * 2 * 3, frameMatrix + 2 * 3, 1.0f, cameraZCoordinate, 3);
-		combineVectors(cameraPositions + (long long) configuration * 2 * 3 + 3, featurePositions, frameMatrix, 1.0f, camereXCoordinate, 3);
-		combineVectors(cameraPositions + (long long) configuration * 2 * 3 + 3, cameraPositions + (long long) configuration * 2 * 3 + 3, frameMatrix + 3, 1.0f, cameraYCoordinate, 3);
-		combineVectors(cameraPositions + (long long) configuration * 2 * 3 + 3, cameraPositions + (long long) configuration * 2 * 3 + 3, frameMatrix + 2 * 3, 1.0f, -cameraZCoordinate, 3);
+		float camereXCoordinate = (featureRadii[configuration * 3] * featureRadii[configuration * 3] - featureRadii[1 + configuration * 3] * featureRadii[1 + configuration * 3] + vectorBXComponent * vectorBXComponent) / (2.0f * vectorBXComponent);
+		float cameraYCoordinate = (featureRadii[configuration * 3] * featureRadii[configuration * 3] - featureRadii[2 + configuration * 3] * featureRadii[2 + configuration * 3] + vectorCXComponent * vectorCXComponent + vectorCYComponent * vectorCYComponent - 2.0f * vectorCXComponent * camereXCoordinate) / (2.0f * vectorCYComponent);
+		float cameraZCoordinate = std::sqrt(featureRadii[configuration * 3] * featureRadii[configuration * 3] - camereXCoordinate * camereXCoordinate - cameraYCoordinate * cameraYCoordinate);
+		combineVectors(vectorT + (long long) configuration * 2 * 3, matrixW, frameMatrix, 1.0f, camereXCoordinate, 3);
+		combineVectors(vectorT + (long long) configuration * 2 * 3, vectorT + (long long) configuration * 2 * 3, frameMatrix + 3, 1.0f, cameraYCoordinate, 3);
+		combineVectors(vectorT + (long long) configuration * 2 * 3, vectorT + (long long) configuration * 2 * 3, frameMatrix + 2 * 3, 1.0f, cameraZCoordinate, 3);
+		combineVectors(vectorT + (long long) configuration * 2 * 3 + 3, matrixW, frameMatrix, 1.0f, camereXCoordinate, 3);
+		combineVectors(vectorT + (long long) configuration * 2 * 3 + 3, vectorT + (long long) configuration * 2 * 3 + 3, frameMatrix + 3, 1.0f, cameraYCoordinate, 3);
+		combineVectors(vectorT + (long long) configuration * 2 * 3 + 3, vectorT + (long long) configuration * 2 * 3 + 3, frameMatrix + 2 * 3, 1.0f, -cameraZCoordinate, 3);
 	}
+	//TESTING
+	for (int i = 0; i < configurations * 2; i++)
+		std::cout << std::setw(15) << vectorT[i * 3] << std::setw(15) << vectorT[i * 3 + 1] << std::setw(15) << vectorT[i * 3 + 2] << "\n";
+	std::cout << "\n";
 }
 
 void multiplyMatrices(float *matrixA, float *matrixB, float *matrixC, int size) {
