@@ -34,6 +34,9 @@ cudaTextureObject_t t_rriii;
 unsigned char *d_ltri;
 unsigned char *d_rtri;
 
+unsigned char *leftRectColour;
+unsigned char *rightRectColour;
+
 template<int w, int h>
 __global__ void rectifyLeftImage(unsigned char *d_ri, unsigned char *d_di, int t_dio);
 template<int w, int h>
@@ -44,8 +47,6 @@ template<int w>
 __global__ void integrateImageHorizontally(int *d_rii, int d_riip);
 template<int w, int h>
 __global__ void transposeImage(unsigned char *d_tri, unsigned char *d_ri);
-
-#include <iostream>
 
 void initializePreprocessing() {
 	cudaMallocPitch(&d_di, &d_dip, DISTORTED_IMAGE_WIDTH * sizeof(unsigned char), DISTORTED_IMAGE_HEIGHT);

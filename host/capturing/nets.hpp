@@ -1,7 +1,7 @@
 #pragma once
 
-extern void *buffer;
+extern void *networkBuffer;
 extern int dataSize;
 
 void initializeServer();
-void receiveData();
+void acquireImage();

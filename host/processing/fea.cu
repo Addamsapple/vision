@@ -1,8 +1,10 @@
-#include <algorithm>
+//BASED ON SURFGPU
+
 #include <cuda_runtime.h>
+#include <iostream>
 
 #include "cam.hpp"
-#include "png.hpp"
+#include "fea.cuh"
 #include "pre.cuh"
 
 #define COMPUTATION_THREADS 96
@@ -11,29 +13,22 @@
 #define COMPUTATION_SCALES 10
 #define COMPUTATION_PADDING 245
 
-#define MAXIMUM_INTEREST_POINTS 1000
-
 #define SUPPRESSION_THREADS 128
 #define SUPPRESSION_BLOCKS ((RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT + SUPPRESSION_THREADS - 1) / SUPPRESSION_THREADS)
 
-#define SUPRESSION_THRESHOLD 10000.0f
+#define SUPRESSION_THRESHOLD 2000.0f
 
 #define REFINEMENT_THREADS 192
 
 #define REFINEMENT_EPSILON 0.00001f
 
-#define DESCRIPTOR_BLOCK_DIMENSIONS 4
-#define DESCRIPTOR_BLOCK_SIZE 5
-#define DESCRIPTOR_GRID_SIZE 4
-
-#define DESCRIPTOR_DIMENSIONS (DESCRIPTOR_GRID_SIZE * DESCRIPTOR_GRID_SIZE * DESCRIPTOR_BLOCK_DIMENSIONS)
 #define DESCRIPTOR_WIDTH 10
 #define DESCRIPTOR_SIGMA 0.4f
 
 #define MATCHING_THREAD_INTEREST_POINTS 4
 
-#define MATCHING_DISTANCE_THRESHOLD 0.1f
-#define MATCHING_DISTANCE_RATIO_THRESHOLD 0.5f
+#define MATCHING_DISTANCE_THRESHOLD 0.3f
+#define MATCHING_DISTANCE_RATIO_THRESHOLD 0.9f//0.7
 
 float *d_lhd;
 float *d_rhd;
@@ -46,19 +41,26 @@ int *d_rip;
 int *d_ripc;
 int ripc;
 
+int fi = 0;
+
 float *d_lrip;
-int *d_lripc;
-int lripc;
+int *d_lripc[2];
+float lrip[MAXIMUM_INTEREST_POINTS * 2];
+int lripc[2];
 
 float *d_rrip;
 int *d_rripc;
+float rrip[MAXIMUM_INTEREST_POINTS * 2];
 int rripc;
 
-float *d_lipd;
+float *d_lipd[2];
+float lipd[MAXIMUM_INTEREST_POINTS * DESCRIPTOR_DIMENSIONS];
+
 float *d_ripd;
 
 int *d_ipm;
 int *d_ipmc;
+int ipm[MAXIMUM_INTEREST_POINTS * 2];
 int ipmc;
 
 __constant__ int d_css[COMPUTATION_SCALES] = {1, 1, 1, 1, 2, 2, 4, 4, 8, 8};
@@ -106,10 +108,16 @@ void initializeFeatureMatching() {
 	cudaMalloc(&d_rip, MAXIMUM_INTEREST_POINTS * sizeof(int) * 3);
 	cudaMalloc(&d_ripc, sizeof(int));
 	cudaMalloc(&d_lrip, MAXIMUM_INTEREST_POINTS * sizeof(int) * 3);
-	cudaMalloc(&d_lripc, sizeof(int));
+	cudaMalloc(&(d_lripc[0]), sizeof(int));
+	//cudaMalloc(d_lripc, sizeof(int));
+	cudaMalloc(&(d_lripc[1]), sizeof(int));
+	//cudaMalloc(d_lripc + 1, sizeof(int));
 	cudaMalloc(&d_rrip, MAXIMUM_INTEREST_POINTS * sizeof(int) * 3);
 	cudaMalloc(&d_rripc, sizeof(int));
-	cudaMalloc(&d_lipd, MAXIMUM_INTEREST_POINTS * DESCRIPTOR_DIMENSIONS * sizeof(int));
+	cudaMalloc(&(d_lipd[0]), MAXIMUM_INTEREST_POINTS * DESCRIPTOR_DIMENSIONS * sizeof(int));
+	//cudaMalloc(d_lipd, MAXIMUM_INTEREST_POINTS * DESCRIPTOR_DIMENSIONS * sizeof(int));
+	cudaMalloc(&(d_lipd[1]), MAXIMUM_INTEREST_POINTS * DESCRIPTOR_DIMENSIONS * sizeof(int));
+	//cudaMalloc(d_lipd + 1, MAXIMUM_INTEREST_POINTS * DESCRIPTOR_DIMENSIONS * sizeof(int));
 	cudaMalloc(&d_ripd, MAXIMUM_INTEREST_POINTS * DESCRIPTOR_DIMENSIONS * sizeof(int));
 	cudaMalloc(&d_ipm, MAXIMUM_INTEREST_POINTS * sizeof(int) * 2);
 	cudaMalloc(&d_ipmc, sizeof(int));
@@ -117,15 +125,16 @@ void initializeFeatureMatching() {
 
 void computeInterestPoints() {
 	computeHessianDeterminants<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<COMPUTATION_BLOCKS, COMPUTATION_THREADS>>>(d_lhd, t_lriii);
-	cudaMemset(&d_lipc, 0, sizeof(int));
+	cudaMemset(d_lipc, 0, sizeof(int));
 	supressInterestPoints<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<SUPPRESSION_BLOCKS, SUPPRESSION_THREADS>>>(d_lip, d_lipc, d_lhd);
 	cudaMemcpy(&lipc, d_lipc, sizeof(int), cudaMemcpyDeviceToHost);
 	lipc = std::min(lipc, MAXIMUM_INTEREST_POINTS);
-	cudaMemset(&d_lripc, 0, sizeof(int));
-	refineInterestPoints<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<(lipc + REFINEMENT_THREADS - 1) / REFINEMENT_THREADS, REFINEMENT_THREADS>>>(d_lrip, d_lripc, d_lhd, d_lip, lipc);
-	cudaMemcpy(&lripc, d_lripc, sizeof(int), cudaMemcpyDeviceToHost);
-	describeInterestPoints<<<lripc, dim3(DESCRIPTOR_BLOCK_SIZE, DESCRIPTOR_BLOCK_SIZE, DESCRIPTOR_GRID_SIZE * DESCRIPTOR_GRID_SIZE)>>>(d_lipd, d_lhd, d_lrip, t_lriii);
-	normalizeInterestPointDescriptors<<<lripc, DESCRIPTOR_DIMENSIONS>>>(d_lipd, d_lhd);
+	cudaMemset(d_lripc[fi], 0, sizeof(int));
+	refineInterestPoints<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<(lipc + REFINEMENT_THREADS - 1) / REFINEMENT_THREADS, REFINEMENT_THREADS>>>(d_lrip, d_lripc[fi], d_lhd, d_lip, lipc);
+	cudaMemcpy(&(lripc[fi]), d_lripc[fi], sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&lrip, d_lrip, MAXIMUM_INTEREST_POINTS * sizeof(float) * 2, cudaMemcpyDeviceToHost);
+	describeInterestPoints<<<lripc[fi], dim3(DESCRIPTOR_BLOCK_SIZE, DESCRIPTOR_BLOCK_SIZE, DESCRIPTOR_GRID_SIZE * DESCRIPTOR_GRID_SIZE)>>>(d_lipd[fi], d_lhd, d_lrip, t_lriii);
+	normalizeInterestPointDescriptors<<<lripc[fi], DESCRIPTOR_DIMENSIONS>>>(d_lipd[fi], d_lhd);
 	computeHessianDeterminants<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<COMPUTATION_BLOCKS, COMPUTATION_THREADS>>>(d_rhd, t_rriii);
 	cudaMemset(d_ripc, 0, sizeof(int));
 	supressInterestPoints<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<SUPPRESSION_BLOCKS, SUPPRESSION_THREADS>>>(d_rip, d_ripc, d_rhd);
@@ -134,15 +143,25 @@ void computeInterestPoints() {
 	cudaMemset(d_rripc, 0, sizeof(int));
 	refineInterestPoints<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<(ripc + REFINEMENT_THREADS - 1) / REFINEMENT_THREADS, REFINEMENT_THREADS>>>(d_rrip, d_rripc, d_rhd, d_rip, ripc);
 	cudaMemcpy(&rripc, d_rripc, sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&rrip, d_rrip, MAXIMUM_INTEREST_POINTS * sizeof(float) * 2, cudaMemcpyDeviceToHost);
 	describeInterestPoints<<<rripc, dim3(DESCRIPTOR_BLOCK_SIZE, DESCRIPTOR_BLOCK_SIZE, DESCRIPTOR_GRID_SIZE * DESCRIPTOR_GRID_SIZE)>>>(d_ripd, d_rhd, d_rrip, t_rriii);
 	normalizeInterestPointDescriptors<<<rripc, DESCRIPTOR_DIMENSIONS>>>(d_ripd, d_rhd);
-	cudaMemset(d_ipmc, 0, sizeof(int));
 }
 
-void matchInterestPoints() {
+void matchViews() {
 	cudaMemset(d_ipmc, 0, sizeof(int));
-	matchInterestPoints<<<(rripc + MATCHING_THREAD_INTEREST_POINTS - 1) / MATCHING_THREAD_INTEREST_POINTS, dim3(DESCRIPTOR_DIMENSIONS / 2, MATCHING_THREAD_INTEREST_POINTS)>>>(d_ipm, d_ipmc, d_lipd, d_ripd, lipc, ripc);
+	matchInterestPoints<<<(rripc + MATCHING_THREAD_INTEREST_POINTS - 1) / MATCHING_THREAD_INTEREST_POINTS, dim3(DESCRIPTOR_DIMENSIONS / 2, MATCHING_THREAD_INTEREST_POINTS)>>>(d_ipm, d_ipmc, d_lipd[fi], d_ripd, lripc[fi], rripc);
 	cudaMemcpy(&ipmc, d_ipmc, sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&ipm, d_ipm, MAXIMUM_INTEREST_POINTS * sizeof(int) * 2, cudaMemcpyDeviceToHost);
+	//std::cout << "view matches: " << lripc[fi] << " " << rripc << " " << ipmc << "\n";
+}
+
+void matchFrames() {
+	cudaMemset(d_ipmc, 0, sizeof(int));
+	matchInterestPoints<<<(lripc[fi] + MATCHING_THREAD_INTEREST_POINTS - 1) / MATCHING_THREAD_INTEREST_POINTS, dim3(DESCRIPTOR_DIMENSIONS / 2, MATCHING_THREAD_INTEREST_POINTS)>>>(d_ipm, d_ipmc, d_lipd[1 - fi], d_lipd[fi], lripc[1 - fi], lripc[fi]);
+	cudaMemcpy(&ipmc, d_ipmc, sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&ipm, d_ipm, MAXIMUM_INTEREST_POINTS * sizeof(int) * 2, cudaMemcpyDeviceToHost);
+	//std::cout << "frame matches: " << lripc[1 - fi] << " " << lripc[fi] << " " << ipmc << "\n";
 }
 
 template<int w, int h>
@@ -345,7 +364,6 @@ __global__ void matchInterestPoints(int *d_ipm, int *d_ipmc, float *d_ipd1, floa
 	int l_ei1 = threadIdx.y * DESCRIPTOR_DIMENSIONS;
 	int l_ei2 = threadIdx.x + threadIdx.y * DESCRIPTOR_DIMENSIONS / 2;
 	for (int l_ip2 = 0; l_ip2 < d_ripc2; l_ip2++) {
-
 		if (l_ei2 < DESCRIPTOR_DIMENSIONS)
 			s_d2[l_ei2] = d_ipd2[l_ei2 + l_ip2 * DESCRIPTOR_DIMENSIONS];
 		__syncthreads();

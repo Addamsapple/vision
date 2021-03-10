@@ -1,1 +1,0 @@
-void performRandomSampleConsensus(float *orientation, float *position, float *pixels, float *points, int features);

@@ -13,10 +13,10 @@
 GLFWwindow *window;
 
 #define ROTATION_SENSITIVITY 0.003f
-#define TRANSLATION_SENSITIVITY 0.1f
+#define TRANSLATION_SENSITIVITY 0.02f
 
-float xCursorPos = 0;
-float yCursorPos = 0;
+double xCursorPos = 0;
+double yCursorPos = 0;
 
 std::vector<Program *> programs;
 
@@ -66,7 +66,8 @@ void initializeGLFW() {
 }
 
 void loadModels() {
-	addModel(new PointCloud("mod.p"), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+	//addModel(new PointCloud("mod.p"), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+	addModel(new PointCloud("bruh.p"), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 #include <iostream>
@@ -83,20 +84,16 @@ void initializeOpenGL() {
 	glBindVertexArray(vertexArrayID);
 	glGenBuffers(models.size() * 2, vertexBufferIDs);
 	glGenBuffers(models.size(), elementBufferIDs);
-	std::cout << glGetError() << "\n";
 	glBindBuffer(GL_ARRAY_BUFFER, vertexBufferIDs[0]);
 	glBufferData(GL_ARRAY_BUFFER, models[0]->pointCount * sizeof(float) * 3, models[0]->points, GL_STATIC_DRAW);
 	int vertexPositionAttribute = glGetAttribLocation(programs[0]->id, "vertexPosition");
 	glVertexAttribPointer(vertexPositionAttribute, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 3, 0);
 	glEnableVertexAttribArray(vertexPositionAttribute);
-	std::cout << glGetError() << "\n";
 	glBindBuffer(GL_ARRAY_BUFFER, vertexBufferIDs[1]);
 	glBufferData(GL_ARRAY_BUFFER, models[0]->pointCount * sizeof(unsigned char) * 3, models[0]->colours, GL_STATIC_DRAW);
 	int vertexColourAttribute = glGetAttribLocation(programs[0]->id, "vertexColour");
 	glVertexAttribPointer(vertexColourAttribute, 3, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(unsigned char) * 3, 0);
-	std::cout << glGetError() << "\n";
 	glEnableVertexAttribArray(vertexColourAttribute);
-	std::cout << glGetError() << "\n";
 	int objectTransformationUniform = glGetUniformLocation(programs[0]->id, "objectTransformation");
 	glUniformMatrix4fv(objectTransformationUniform, 1, GL_FALSE, transformations[0]);
 	glEnable(GL_DEPTH_TEST);

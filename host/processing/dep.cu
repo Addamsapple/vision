@@ -1,14 +1,22 @@
 #include <cuda_runtime.h>
+#include <fstream>
 
 #include "cam.hpp"
-#include "png.hpp"
+#include "tra.hpp"
+#include "pos.hpp"
 #include "pre.cuh"
+
+#include "../capturing/jpg.hpp";
+
+//#include <iostream>
+
+#define EXTRA_REFINEMENT_ITERATIONS 0
 
 #define COMPUTATION_THREADS 128
 #define COMPUTATION_BLOCKS ((RECTIFIED_IMAGE_HEIGHT + COMPUTATION_THREADS - 1) / COMPUTATION_THREADS * 2)
 
 #define MAXIMUM_DISPARITY UCHAR_MAX
-#define OCCLUSION_COST 300.0f
+#define OCCLUSION_COST 200.0f//300.0f
 
 #define MATCH_TRANSITION 1
 #define LEFT_OCCLUSION_TRANSITION 2
@@ -26,25 +34,28 @@ size_t d_ttp;
 float *d_ct;
 size_t d_ctp;
 
+unsigned char *dm;
+
 template<int w, int h>
-__global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
+__global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp);
 template<int w, int h>
-__global__ void reconstructBestSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
+__global__ void reconstructBestSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp);
 template<int w, int h>
 __global__ void propagateDiscontinuities(unsigned char *d_b2, unsigned char *d_b1);
 template<int w, int h>
 __global__ void propagateOcclusions(unsigned char *d_b2, unsigned char *d_b1);
 
 template<int w, int h>
-__device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
+__device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp);
 template<int w, int h>
-__device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp);
+__device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp);
 
 void initializeDisparityMapComputation() {
 	cudaMallocPitch(&d_tt, &d_ttp, RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char), RECTIFIED_IMAGE_WIDTH * (MAXIMUM_DISPARITY + 1));
 	d_ttp /= sizeof(unsigned char);
 	cudaMallocPitch(&d_ct, &d_ctp, RECTIFIED_IMAGE_HEIGHT * sizeof(float), (MAXIMUM_DISPARITY + 1) * 4);
 	d_ctp /= sizeof(float);
+	dm = new unsigned char[RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT];
 }
 
 void computeDisparityMap() {
@@ -52,22 +63,62 @@ void computeDisparityMap() {
 	reconstructBestSolution<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<RECONSTRUCTION_BLOCKS, COMPUTATION_THREADS>>>(d_ltri, d_tt, d_ct, d_ttp, d_ctp);
 }
 
-void refineDisparityMap(unsigned char *a, int iterations) {
+void refineDisparityMap() {
 	unsigned char *buffers[2] = {d_ltri, d_rtri};
-	int index = 0;
-	if (iterations > 0) {
-		propagateDiscontinuities<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<PROPAGATION_BLOCKS, PROPAGATION_THREADS>>>(buffers[1 - index], buffers[index]);
-		index = 1 - index;
-		for (int iteration = 1; iteration < iterations; iteration++) {
-			propagateOcclusions<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<PROPAGATION_BLOCKS, PROPAGATION_THREADS>>>(buffers[1 - index], buffers[index]);
-			index = 1 - index;
-		}
+	propagateDiscontinuities<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<PROPAGATION_BLOCKS, PROPAGATION_THREADS>>>(buffers[1], buffers[0]);
+	int bufferIndex = 1;
+	for (int iteration = 0; iteration < EXTRA_REFINEMENT_ITERATIONS; iteration++) {
+		propagateOcclusions<RECTIFIED_IMAGE_WIDTH, RECTIFIED_IMAGE_HEIGHT><<<PROPAGATION_BLOCKS, PROPAGATION_THREADS>>>(buffers[1 - bufferIndex], buffers[bufferIndex]);
+		bufferIndex = 1 - bufferIndex;
 	}
-	cudaMemcpy(a, buffers[index], RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+	cudaMemcpy(dm, buffers[bufferIndex], RECTIFIED_IMAGE_WIDTH * RECTIFIED_IMAGE_HEIGHT * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+}
+
+void constructPointCloud() {
+	std::ofstream p("points.p", std::ofstream::binary | std::ofstream::app);
+	std::ofstream c("colours.p", std::ofstream::binary | std::ofstream::app);
+	float point[3];
+	float point2[3];
+	unsigned char col[3] = {100, 100, 100};
+	for (int row = 0; row < RECTIFIED_IMAGE_HEIGHT; row++)
+		for (int column = 0; column < RECTIFIED_IMAGE_WIDTH; column++) {
+			if (dm[row + column * RECTIFIED_IMAGE_HEIGHT] != 0) {
+				point[0] = (column + LEFT_RECTIFIED_COLUMN - HORIZONTAL_PRINCIPAL_POINT) * BASELINE / dm[row + column * RECTIFIED_IMAGE_HEIGHT];
+				point[1] = (row + TOP_RECTIFIED_ROW - VERTICAL_PRINCIPAL_POINT) * BASELINE / dm[row + column * RECTIFIED_IMAGE_HEIGHT];
+				point[2] = HORIZONTAL_FOCAL_LENGTH * BASELINE / dm[row + column * RECTIFIED_IMAGE_HEIGHT];
+				for (int dimension = 0; dimension < 3; dimension++)
+					point2[dimension] = vectorDotProduct(point, orientation + (long long) dimension * 3, 3);//matrixInnerProduct(point, orientation + dimension, 3);
+				combineVectors(point, point2, position, 1.0f, 1.0f, 3);
+				point[0] *= -1.0f;
+				point[1] *= -1.0f;
+				p.write((char *) point, sizeof(float) * 3);
+
+
+					float l_ud = (column + LEFT_RECTIFIED_COLUMN) * LEFT_HOMOGRAPHY_20 + (row + TOP_RECTIFIED_ROW) * LEFT_HOMOGRAPHY_21 + LEFT_HOMOGRAPHY_22;
+					float l_ux = ((column + LEFT_RECTIFIED_COLUMN) * LEFT_HOMOGRAPHY_00 + (row + TOP_RECTIFIED_ROW) * LEFT_HOMOGRAPHY_01 + LEFT_HOMOGRAPHY_02) / l_ud;
+					float l_uy = ((column + LEFT_RECTIFIED_COLUMN) * LEFT_HOMOGRAPHY_10 + (row + TOP_RECTIFIED_ROW) * LEFT_HOMOGRAPHY_11 + LEFT_HOMOGRAPHY_12) / l_ud;
+					float l_sr = l_ux * l_ux + l_uy * l_uy;
+					float l_df = l_sr * l_sr * SECOND_LEFT_DISTORTION_COEFFICIENT + l_sr * FIRST_LEFT_DISTORTION_COEFFICIENT + 1.0;
+					int l_dc = l_ux * l_df * LEFT_HORIZONTAL_FOCAL_LENGTH + LEFT_HORIZONTAL_PRINCIPAL_POINT;
+					l_dc = std::min(DISTORTED_IMAGE_WIDTH - 1, std::max(0, l_dc));
+					int l_dr = l_uy * l_df * LEFT_VERTICAL_FOCAL_LENGTH + LEFT_VERTICAL_PRINCIPAL_POINT;
+					l_dr = std::min(DISTORTED_IMAGE_HEIGHT - 1, std::max(0, l_dr));
+
+					c.write((char *) leftJPG + l_dc * 3 + l_dr * DISTORTED_IMAGE_WIDTH * 3, sizeof(unsigned char) * 3);
+
+
+
+
+
+				//c.write((char *) leftJPG + column * 3 + row * DISTO, sizeof(unsigned char) * 3);
+			}
+		}
+	p.close();
+	c.close();
 }
 
 template<int w, int h>
-__global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
+__global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp) {
 	if (blockIdx.x < gridDim.x / 2)
 		computeSolutionsRightwards<w, h>(d_ltri, d_rtri, d_tt, d_ct, d_ttp, d_ctp);
 	else
@@ -78,7 +129,7 @@ __global__ void computeSolutions(unsigned char *d_ltri, unsigned char *d_rtri, u
 #define ct(row, column, offset) d_ct[row + d_ctp * ((column) * (MAXIMUM_DISPARITY + 1) + offset)]
 
 template<int w, int h>
-__global__ void reconstructBestSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
+__global__ void reconstructBestSolution(unsigned char *d_b, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp) {
 	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
 	if (l_r < h) {
 		float l_mc = FLT_MAX;
@@ -163,7 +214,7 @@ __global__ void propagateOcclusions(unsigned char *d_b2, unsigned char *d_b1) {
 }
 
 template<int w, int h>
-__device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
+__device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp) {
 	int l_r = threadIdx.x + blockIdx.x * blockDim.x;
 	if (l_r < h) {
 		for (int l_do = 0; l_do < MAXIMUM_DISPARITY; l_do++) {
@@ -232,7 +283,7 @@ __device__ void computeSolutionsRightwards(unsigned char *d_ltri, unsigned char 
 }
 
 template<int w, int h>
-__device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, int d_ttp, int d_ctp) {
+__device__ void computeSolutionsLeftwards(unsigned char *d_ltri, unsigned char *d_rtri, unsigned char *d_tt, float *d_ct, size_t d_ttp, size_t d_ctp) {
 	int l_r = threadIdx.x + blockIdx.x * blockDim.x - gridDim.x * blockDim.x / 2;
 	if (l_r < h) {
 		float l_li = d_ltri[l_r + (w - 1) * h];

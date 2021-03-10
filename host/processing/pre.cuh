@@ -6,9 +6,8 @@ extern unsigned char *d_rri;
 extern int *d_lrii;
 extern cudaTextureObject_t t_lriii;
 
-extern cudaTextureObject_t t_rriii;
-
 extern int *d_rrii;
+extern cudaTextureObject_t t_rriii;
 
 extern unsigned char *d_ltri;
 extern unsigned char *d_rtri;

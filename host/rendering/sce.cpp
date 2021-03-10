@@ -7,10 +7,10 @@
 #include "mod.hpp"
 #include "sce.hpp"
 
-#define NEAR_PLANE_DISTANCE 0.7f
-#define FAR_PLANE_DISTANCE 50.0f
-#define NEAR_PLANE_WIDTH 0.5f
-#define NEAR_PLANE_HEIGHT 0.5f
+#define NEAR_PLANE_DISTANCE 0.1f//0.7f
+#define FAR_PLANE_DISTANCE 4.0f//50.0f
+#define NEAR_PLANE_WIDTH 0.2f//0.5f
+#define NEAR_PLANE_HEIGHT 0.2f//0.5f
 
 float frameMatrix[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
 float rotatedFrameMatrix[16];
@@ -33,7 +33,8 @@ std::vector<float *> transformations(0);
 
 void initializeScene() {
 	pitch = 0; yaw = M_PI * 2 / 3;
-	x = 3.0f, y = 3.0f, z = 3.0f;
+	//x = 3.0f, y = 3.0f, z = 3.0f;
+	x = 0.0f, y = 0.0f, z = 0.0f;
 	constructPitchMatrix(tmpMatrix0, -pitch);
 	constructYawMatrix(tmpMatrix1, -yaw);
 	multiplyMatrices(rotationMatrix, tmpMatrix0, tmpMatrix1);

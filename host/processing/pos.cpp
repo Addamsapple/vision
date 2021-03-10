@@ -1,12 +1,15 @@
 #include <algorithm>
-//#include <cmath> - might be needed for memcpy
+#include <cmath>
 
 #include <iostream>
-#include <iomanip>
 
 #include "cam.hpp"
 
-#define REFINEMENT_ITERATIONS 200
+#define RANSAC_ALGORITHM_ITERATIONS 2000
+
+#define RANSAC_INLIER_ERROR_THRESHOLD 169.0f//81.0f
+
+#define EXTRA_REFINEMENT_ITERATIONS 100
 #define FACTORIZATION_ITERATIONS 200
 
 #define POLYNOMIAL_DEGREE 4
@@ -42,10 +45,6 @@ float vectorDotProduct(float *vectorA, float *vectorB, int size);
 float vectorDistance(float *vectorA, float *vectorB, int size);
 float vectorMagnitude(float *vector, int size);
 
-#define RANSAC_ALGORITHM_ITERATIONS 10
-
-#define RANSAC_INLIER_ERROR_THRESHOLD 0.0001f
-
 void performRandomSampleConsensus(float *orientation, float *position, float *pixels, float *points, int features) {
 	float sampledPixels[4 * 3];
 	float sampledPoints[4 * 3];
@@ -78,8 +77,8 @@ void performRandomSampleConsensus(float *orientation, float *position, float *pi
 	}
 	memcpy(orientation, orientations + (long long) bestIteration * 3 * 3, sizeof(float) * 3 * 3);
 	memcpy(position, positions + (long long) bestIteration * 3, sizeof(float) * 3);
-	std::cout << "most inliers: " << mostInliers << "\n";
-	std::cout << "lowest total error: " << lowestError << "\n";
+	//std::cout << "most inliers: " << mostInliers << "\n";
+	//std::cout << "lowest total error: " << lowestError << "\n";
 }
 
 void selectUniqueFeatures(float *sampledPixels, float *sampledPoints, float *pixels, float *points, int features) {
@@ -122,9 +121,9 @@ void computeCameraPose(float *orientation, float *position, float *pixels, float
 	float rayLengths[POLYNOMIAL_DEGREE * 2 * 3];
 	int configurations;
 	computeConfigurations(rayLengths, &configurations, roots, polynomialCoefficients, cosines, distances, ratios);
-	float positions[POLYNOMIAL_DEGREE * 2 * 3];
+	float positions[POLYNOMIAL_DEGREE * 2 * 2 * 3];
 	trilaterateCameraPosition(positions, points, rayLengths, configurations);
-	float orientations[POLYNOMIAL_DEGREE * 2 * 3 * 3];
+	float orientations[POLYNOMIAL_DEGREE * 2 * 2 * 3 * 3];
 	computeCameraOrientation(orientations, positions, unprojectedPixels, points, configurations * 2);
 	selectBestSolution(orientation, position, orientations, positions, pixels, points, configurations * 2);
 }
@@ -171,7 +170,7 @@ void refinePolynomialRoots(float *roots, float *coefficients) {
 	float rootPowers[POLYNOMIAL_DEGREE + 1];
 	rootPowers[0] = 1.0f;
 	for (int root = 0; root < POLYNOMIAL_DEGREE; root++)
-		for (int iteration = 0; iteration < REFINEMENT_ITERATIONS; iteration++) {
+		for (int iteration = 0; iteration < EXTRA_REFINEMENT_ITERATIONS; iteration++) {
 			for (int power = 1; power < POLYNOMIAL_DEGREE + 1; power++)
 				rootPowers[power] = roots[root] * rootPowers[power - 1];
 			float function = 0.0f;
@@ -295,20 +294,19 @@ void computeReprojectionError(float *reprojectionError, float *orientation, floa
 	float reprojectedPixel[2];
 	projectPoint(reprojectedPixel, orientation, position, point);
 	*reprojectionError = (reprojectedPixel[0] - pixel[0]) * (reprojectedPixel[0] - pixel[0]) + (reprojectedPixel[1] - pixel[1]) * (reprojectedPixel[1] - pixel[1]);
-	std::cout << std::setw(15) << reprojectedPixel[0] << std::setw(15) << reprojectedPixel[1] << std::setw(15) << *reprojectionError << "\n";
 }
 
 void projectPoint(float *pixel, float *orientation, float *position, float *point) {
 	float translatedVector[3];
 	combineVectors(translatedVector, point, position, 1.0f, -1.0f, 3);
 	float z = matrixInnerProduct(translatedVector, orientation + 2, 3);
-	pixel[0] = matrixInnerProduct(translatedVector, orientation, 3) / z;//matrixInnerProduct(translatedVector, orientation, 3) * HORIZONTAL_FOCAL_LENGTH / z + HORIZONTAL_PRINCIPAL_POINT
-	pixel[1] = matrixInnerProduct(translatedVector, orientation + 1, 3) / z;//matrixInnerProduct(translatedVector, orientation + 1, 3) * VERTICAL_FOCAL_LENGTH / z + VERTICAL_PRINCIPAL_POINT
+	pixel[0] = matrixInnerProduct(translatedVector, orientation, 3) * HORIZONTAL_FOCAL_LENGTH / z - LEFT_RECTIFIED_COLUMN + HORIZONTAL_PRINCIPAL_POINT;
+	pixel[1] = matrixInnerProduct(translatedVector, orientation + 1, 3) * VERTICAL_FOCAL_LENGTH / z - TOP_RECTIFIED_ROW + VERTICAL_PRINCIPAL_POINT;
 }
 
 void unprojectPixel(float *ray, float *point) {
-	ray[0] = point[0];//(point[0] - HORIZONTAL_PRINCIPAL_POINT) / HORIZONTAL_FOCAL_LENGTH
-	ray[1] = point[1];//(point[1] - VERTICAL_PRINCIPAL_POINT) / VERTICAL_FOCAL_LENGTH
+	ray[0] = (point[0] + LEFT_RECTIFIED_COLUMN - HORIZONTAL_PRINCIPAL_POINT) / HORIZONTAL_FOCAL_LENGTH;
+	ray[1] = (point[1] + TOP_RECTIFIED_ROW - VERTICAL_PRINCIPAL_POINT) / VERTICAL_FOCAL_LENGTH;
 	ray[2] = 1.0f;
 	normalizeVector(ray, 3);
 }
